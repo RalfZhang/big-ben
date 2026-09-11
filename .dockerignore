@@ -3,7 +3,9 @@ node_modules
 .gitignore
 *.md
 config.js
+config.js.bak
 config.example.js
+data
 douban-guang.service
 Dockerfile
 compose.yaml

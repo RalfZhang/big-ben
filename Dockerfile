@@ -15,6 +15,11 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 # 只拷代码本身。config.js 不进镜像，运行时挂载
 COPY index.js healthcheck.js ./
+COPY lib ./lib
+COPY platforms ./platforms
+
+# Threads token 要落盘续期，这个目录必须对 node 用户可写
+RUN mkdir -p /app/data && chown -R node:node /app/data
 
 USER node
 

@@ -1,7 +1,7 @@
 {
-  "name": "douban-guang",
-  "version": "2.0.0",
-  "description": "豆瓣大笨钟",
+  "name": "big-ben",
+  "version": "3.0.0",
+  "description": "大笨钟 —— 整点报时，同时发豆瓣 / Threads / 长毛象",
   "main": "index.js",
   "type": "module",
   "author": "RalfZ",
@@ -14,6 +14,7 @@
     "node-schedule": "^2.1.1"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "once": "node index.js --once"
   }
 }

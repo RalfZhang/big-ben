@@ -5,7 +5,7 @@
  */
 import fs from 'node:fs';
 
-const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || '/tmp/douban-guang.heartbeat';
+const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || '/tmp/big-ben.heartbeat';
 const STALE_MS = 15 * 60 * 1000;
 
 try {

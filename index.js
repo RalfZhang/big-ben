@@ -1,239 +1,88 @@
 /**
- * 大笨钟
+ * 大笨钟 —— 整点报时，同时发豆瓣 / Threads / 长毛象
  * @authors RalfZ (ralfz.zhang@gmail.com)
  */
-import crypto from 'node:crypto';
-import fs from 'node:fs';
 import ns from 'node-schedule';
-import mt from 'moment-timezone';
 
-import config from './config.js';
+import { log, describeError } from './lib/log.js';
+import { beat } from './lib/heartbeat.js';
+import { sleep, isRetryable } from './lib/retry.js';
+import { getText, idempotencyKey, now } from './lib/text.js';
+import douban from './platforms/douban.js';
+import threads from './platforms/threads.js';
+import mastodon from './platforms/mastodon.js';
 
-let accessToken = null;
+const platforms = [douban, threads, mastodon].filter((p) => p.enabled);
 
-// healthcheck.js 读这个文件的 mtime 判断进程是否还活着
-const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || '/tmp/douban-guang.heartbeat';
-function beat() {
-  try { fs.writeFileSync(HEARTBEAT_FILE, String(Date.now())); }
-  catch (err) { log.warn(`heartbeat write failed: ${err.message}`); }
+const once = process.argv.includes('--once');
+
+// POST_ON_STARTUP：逗号分隔的平台名（douban / threads / mastodon），或 all；
+// 空 / 0 / false 则不发。用途是修完某个平台重启后只让它发一条，确认发布链路真的通了 ——
+// 全发的话另外两个平台就是白噪音。
+function startupTargets() {
+  const raw = (process.env.POST_ON_STARTUP || '').trim().toLowerCase();
+  if (!raw || raw === '0' || raw === 'false') return [];
+  if (raw === '1' || raw === 'all') return platforms;
+
+  const want = raw.split(',').map((n) => n.trim()).filter(Boolean);
+  const unknown = want.filter((n) => !platforms.some((p) => p.name === n));
+  if (unknown.length) {
+    log.warn(`POST_ON_STARTUP 里的 ${unknown.join(', ')} 不是已启用的平台，忽略`
+      + `（可选：${platforms.map((p) => p.name).join(' / ')} / all）`);
+  }
+  return platforms.filter((p) => want.includes(p.name));
 }
 
-// ---- logger ---------------------------------------------------------------
-// LOG_LEVEL: debug < info < warn < error（默认 info）。所有时间统一北京时间。
-const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
-const threshold = LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LEVELS.info;
+const MAX_ATTEMPTS = 3;
 
-function emit(level, msg, extra) {
-  if (LEVELS[level] < threshold) return;
-  const ts = mt().tz('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss');
-  const line = `${ts} [${level.toUpperCase()}] ${msg}`;
-  const sink = level === 'error' || level === 'warn' ? console.error : console.log;
-  if (extra !== undefined) sink(line, extra);
-  else sink(line);
-}
+// 单个平台的一次投递。失败只影响自己，并标记下轮重新 init。
+// 实例 500、限流、网络抖动都是「下一秒就好了」的错，一次就放弃等于白丢一个整点，
+// 所以在这里统一退避重试 —— 各平台 adapter 只管把错误如实抛出来。
+async function deliver(p, text, ctx) {
+  const started = Date.now();
+  let lastErr;
 
-const log = {
-  debug: (m, e) => emit('debug', m, e),
-  info: (m, e) => emit('info', m, e),
-  warn: (m, e) => emit('warn', m, e),
-  error: (m, e) => emit('error', m, e),
-};
-
-// 把任意错误（HTTP 错误 / undici 网络错误 / 抛出的对象）压成一行可读文本
-function describeError(err) {
-  if (!err) return 'unknown error';
-  const parts = [];
-  if (err.statusCode) parts.push(`HTTP ${err.statusCode}`);
-  if (err.body !== undefined) {
-    if (err.body && typeof err.body === 'object') {
-      const { code, msg, localized_message: lm } = err.body;
-      parts.push(JSON.stringify({ code, msg: msg || lm }));
-    } else {
-      parts.push(String(err.body).slice(0, 200));
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      if (!p.ready) {
+        await p.init();
+        p.ready = true;
+      }
+      log.debug(`${p.name} <- ${text}`);
+      const id = await p.post(text, ctx);
+      log.info(`${p.name} OK (id=${id ?? '-'}, ${Date.now() - started}ms)`);
+      return;
+    } catch (err) {
+      lastErr = err;
+      // 这里不动 p.ready：能进重试的都是 5xx / 限流 / 网络抖动，重登一遍没有意义。
+      // 真正需要重登的错（token 失效）是 4xx，不可重试，会直接落到下面
+      if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) break;
+      log.warn(`${p.name} attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying: ${describeError(err)}`);
+      await sleep(2000 * attempt);
     }
   }
-  // undici 的 "fetch failed" 真正原因都在 err.cause 里（ENOTFOUND/ETIMEDOUT/...）
-  if (err.cause) parts.push(`cause=${err.cause.code || err.cause.message || err.cause}`);
-  if (!parts.length) parts.push(err.message || String(err));
-  return parts.join(' ');
-}
-// ---------------------------------------------------------------------------
 
-async function frodoRequest({ url, method = 'GET', form }) {
-  method = method.toUpperCase();
-  const u = new URL(url);
-  const path = u.pathname;
-
-  const headers = {
-    // 对齐真机抓包的 UA：带 udid + douban_udid，字段顺序也一致
-    'User-Agent':
-      `api-client/1 com.douban.frodo/7.130.0.beta2(357) Android/${config.api.device.sdkInt}` +
-      `  udid/${config.api.device.id}  douban_udid/${config.api.device.doubanId}` +
-      ` model/${config.api.device.model} brand/${config.api.device.manufacturer.toLowerCase()}` +
-      `  rom/android  network/wifi  platform/mobile  foldable/0 nd/1` +
-      ` product/${config.api.device.product} vendor/${config.api.device.manufacturer}`,
-  };
-
-  if (path !== '/service/auth2/token' && accessToken) {
-    headers.Authorization = `Bearer ${accessToken}`;
-  }
-
-  const isWrite = ['PATCH', 'POST', 'PUT'].includes(method);
-  const body = isWrite ? new URLSearchParams(form || {}) : null;
-
-  // 对齐真机：写请求把公共/鉴权参数放 body，读请求放 query
-  const addParam = (name, value) => {
-    if (isWrite) body.set(name, value);
-    else u.searchParams.set(name, value);
-  };
-
-  addParam('udid', config.api.device.id);
-  addParam('douban_udid', config.api.device.doubanId);   // 新版必带（抓包发现）
-  addParam('apikey', config.api.key);
-  addParam('os_rom', 'android');
-  addParam('channel', 'douban');   // 真机是小写 douban，不是 Douban
-
-  let signature = method;
-  signature += `&${encodeURIComponent(decodeURIComponent(path).replace(/\/$/, ''))}`;
-  if (headers.Authorization) {
-    signature += `&${headers.Authorization.substring(7)}`;
-  }
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  signature += `&${timestamp}`;
-  const sig = crypto.createHmac('sha1', config.api.secret).update(signature).digest('base64');
-  addParam('_sig', sig);
-  addParam('_ts', timestamp);
-
-  const init = { method, headers, signal: AbortSignal.timeout(15000) };
-  if (isWrite) {
-    init.body = body.toString();
-    headers['Content-Type'] = 'application/x-www-form-urlencoded';
-  }
-
-  const started = Date.now();
-  log.debug(`${method} ${path}`);
-  const res = await fetch(u.toString(), init);
-  const text = await res.text();
-  let parsed = text;
-  try { parsed = JSON.parse(text); } catch { /* not JSON */ }
-
-  log.debug(`${method} ${path} -> ${res.status} (${Date.now() - started}ms)`);
-
-  if (!res.ok) {
-    const err = new Error(`HTTP ${res.status}`);
-    err.statusCode = res.status;
-    err.body = parsed;
-    throw err;
-  }
-  return parsed;
+  // 彻底失败，标记下轮重新 init —— token 失效这类问题靠重登自愈
+  p.ready = false;
+  log.error(`${p.name} FAILED (${Date.now() - started}ms): ${describeError(lastErr)}`);
+  throw lastErr;
 }
 
-async function registerDevice() {
-  // 真机启动时会先注册设备（device_id + douban_udid），再登录
-  try {
-    await frodoRequest({
-      url: 'https://frodo.douban.com/api/v2/register_device',
-      method: 'POST',
-      form: { device_id: config.api.device.id },
-    });
-    log.info('device registered');
-  } catch (err) {
-    log.warn(`register_device failed (continuing): ${describeError(err)}`);
-  }
-}
-
-async function authenticate() {
-  const body = await frodoRequest({
-    url: 'https://frodo.douban.com/service/auth2/token',
-    method: 'POST',
-    form: {
-      client_id: config.api.key,
-      client_secret: config.api.secret,
-      redirect_uri: 'frodo://app/oauth/callback/',
-      disable_account_create: 'false',
-      grant_type: 'password',
-      username: config.username,
-      password: config.password,
-    },
-  });
-  if (!body.access_token) throw body;
-  accessToken = body.access_token;
-  log.info(`authenticated as ${body.douban_user_name || body.douban_user_id}`);
-}
-
-// 新版豆瓣发广播用 /api/v2/topic/post（旧的 status/create_status 已废弃，返回 999）。
-// 正文是 Draft.js 结构的 content JSON。
-function buildContent(text) {
-  return JSON.stringify({
-    blocks: [{
-      data: { align: 'left' },
-      depth: 0,
-      entityRanges: [],
-      inlineStyleRanges: [],
-      key: '',
-      text,
-      type: 'unstyled',
-    }],
-    entityMap: {},
-  });
-}
-
-async function sendBroadcast(text, retried = false) {
-  const started = Date.now();
-  try {
-    const body = await frodoRequest({
-      url: 'https://frodo.douban.com/api/v2/topic/post',
-      method: 'POST',
-      form: {
-        title: '',
-        content: buildContent(text),
-        original: '0',
-        accessible: 'public',
-        reply_limit: 'A',
-        group_id: '0',
-        send_status: '0',
-        enable_photo_watermark: 'false',
-        video_is_aigc: '0',
-      },
-    });
-    log.info(`broadcast OK (id=${body && body.id}, ${Date.now() - started}ms)`);
-  } catch (err) {
-    const code = err.body && err.body.code;
-    // 103 invalid token, 106 expired, 119 invalid refresh, 123 expired since password change
-    if (!retried && [103, 106, 119, 123].includes(code)) {
-      log.warn(`token invalid (code ${code}), re-authenticating`);
-      await authenticate();
-      return sendBroadcast(text, true);
-    }
-    log.error(`broadcast failed (${Date.now() - started}ms): ${describeError(err)}`);
-    throw err;
-  }
-}
-
-function getText() {
-  const now = mt().tz('Asia/Shanghai');
-  const yearStart = mt(now).startOf('year');
-  const yearEnd = mt(yearStart).add(1, 'year');
-  let progress = Math.round(100000 * now.diff(yearStart) / yearEnd.diff(yearStart)) / 1000;
-  let hour = +now.format('HH');
-  if (hour === 0) hour = 24;
-  let year = now.format('YYYY');
-  if (progress === 0) {
-    year = year - 1;
-    progress = 100;
-  }
-  return '咣！'.repeat(hour) + `豆瓣大笨钟提醒您：北京时间${hour}点整，${year}年已悄悄溜走${progress}%。`;
+// makeText 收到同一个 at，保证各平台报的进度百分比逐字一致
+async function postRound(makeText, { at = now(), targets = platforms, kind = 'hourly' } = {}) {
+  const ctx = { at, kind, idempotencyKey: idempotencyKey(kind, at) };
+  const results = await Promise.allSettled(
+    targets.map((p) => deliver(p, makeText(p, at), ctx)),
+  );
+  const ok = results.filter((r) => r.status === 'fulfilled').length;
+  log.info(`round done: ${ok}/${targets.length} succeeded`);
+  return ok;
 }
 
 async function postHourly() {
-  const text = getText();
-  log.info(`posting: ${text}`);
-  try {
-    await sendBroadcast(text);
-  } catch {
-    // 具体原因已在 sendBroadcast 里 log.error 过，这里只标记本次整点放弃
-    log.warn('hourly post given up after failure');
-  }
+  const at = now();
+  log.info(`posting for ${at.format('YYYY-MM-DD HH:00')}`);
+  await postRound((p, t) => getText(p.brand, t), { at });
 }
 
 // 兜底：进程级异常也要留下日志，方便容器重启后回溯
@@ -246,11 +95,38 @@ process.on('uncaughtException', (err) => {
 });
 
 log.info(`大笨钟 starting (node ${process.version}, log level ${process.env.LOG_LEVEL || 'info'})`);
+
+if (!platforms.length) {
+  log.error('没有启用任何平台，检查 config.js 里各平台的 enabled');
+  process.exit(1);
+}
+log.info(`platforms: ${platforms.map((p) => p.name).join(', ')}`);
 beat();
 
-await registerDevice();
-await authenticate();
-await sendBroadcast('尝试重启中……').catch(() => log.warn('startup broadcast failed (see error above)'));
+// 启动时先把各平台登上，问题当场暴露；但登不上不能拖垮进程 ——
+// 否则配合 restart: unless-stopped 就是无限重启，下个整点自会重试。
+await Promise.allSettled(platforms.map(async (p) => {
+  try {
+    await p.init();
+    p.ready = true;
+  } catch (err) {
+    p.ready = false;
+    log.error(`${p.name} init failed (will retry hourly): ${describeError(err)}`);
+  }
+}));
+
+if (once) {
+  const ok = await postRound((p, t) => getText(p.brand, t));
+  process.exit(ok === platforms.length ? 0 : 1);
+}
+
+const startup = startupTargets();
+if (startup.length) {
+  log.info(`startup notice -> ${startup.map((p) => p.name).join(', ')}`);
+  await postRound(() => '尝试启动中……', { targets: startup, kind: 'boot' });
+} else {
+  log.info('startup notice skipped (POST_ON_STARTUP=douban 可让指定平台发一条确认发布链路)');
+}
 
 ns.scheduleJob('0 * * * *', postHourly);
 
@@ -259,3 +135,11 @@ ns.scheduleJob('30 */10 * * * *', () => {
   log.debug('wakeup tick');
   beat();
 });
+
+// Threads 长效 token 每天续一次（内部有「满 24 小时才续」的判断）
+if (threads.enabled) {
+  ns.scheduleJob('0 4 * * *', async () => {
+    try { await threads.maybeRefresh(); }
+    catch (err) { log.error(`threads token refresh failed: ${describeError(err)}`); }
+  });
+}

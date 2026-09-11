@@ -1,14 +1,20 @@
 services:
-  douban-guang:
+  big-ben:
     build: .
-    container_name: douban-guang
+    container_name: big-ben
     restart: unless-stopped
     environment:
       # debug < info < warn < error，排查问题时改成 debug 看每个请求的耗时/状态
       - LOG_LEVEL=info
+      # 留空则启动时不发帖。修完某个平台后想确认发布链路通了，就临时指定它：
+      #   POST_ON_STARTUP=douban docker compose up -d
+      # 可填逗号分隔的平台名，或 all。不写进文件，避免以后每次重启都发。
+      - POST_ON_STARTUP=${POST_ON_STARTUP:-}
     volumes:
       # config.js 不进镜像，运行时只读挂载；改完跑 docker compose restart 即可
       - ./config.js:/app/config.js:ro
+      # Threads token 每天续期后要写回来，必须是可写卷，否则重启就丢
+      - ./data:/app/data
     # 限制日志大小，避免长期运行把磁盘写满（默认 docker 日志无上限）
     logging:
       driver: json-file
