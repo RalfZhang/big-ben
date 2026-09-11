@@ -6,7 +6,7 @@
 | --- | --- |
 | 豆瓣 | https://www.douban.com/people/160931760/ |
 | Threads | https://www.threads.com/@threads_big_ben |
-| 长毛象 | https://m.cmx.im/@cmxBigBen |
+| 长毛象 | <a rel="me" href="https://m.cmx.im/@cmxBigBen">https://m.cmx.im/@cmxBigBen</a> |
 
 
 ```
