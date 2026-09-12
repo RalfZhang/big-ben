@@ -92,6 +92,12 @@ async function graph(path, { method = 'GET', form, base = GRAPH } = {}) {
   return parsed;
 }
 
+// Meta 的错误体是 { error: { code, message } }，错误码埋在 error 里 ——
+// 直接读 err.body.code 永远是 undefined，code 24 的判断会全部失效。
+function errorCode(err) {
+  return err?.body?.error?.code ?? err?.body?.code;
+}
+
 // token 满 24 小时才允许续期；每次续期重新计 60 天，
 // 所以只要离线不超过 59 天，回来都还能自动救回来。
 // 过期是本地就能判定的死局，救法明确，值得单独报出来
@@ -127,33 +133,43 @@ async function maybeRefresh() {
 
 // 纯文本 container 并不是立即就绪的：实测建完马上 publish 会吃一个 HTTP 400 code 24
 // （查状态是 IN_PROGRESS），要等几秒。先轮询到 FINISHED 再发，省掉那次必然失败的 publish。
-// 这只是优化不是前提 —— 状态查不到就直接往下走，让 publish 自己去重试。
-async function waitReady(id, timeoutMs = 30000) {
+// code 24 无论出现在查状态还是 publish，含义都一样：还没就绪，等就完了。
+// 别的错才是真查不到状态，那就直接往下走，让 publish 自己去撞。
+async function waitReady(id, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   let delay = 500;
+  let state;
 
   for (;;) {
-    let st;
+    let st = null;
     try {
       st = await graph(`/${id}`, { form: { fields: 'status,error_message' } });
     } catch (err) {
-      log.debug(`threads container ${id} status query failed: ${describeError(err)}`);
-      return;
+      // 刚建出来的头几秒 container 连查都查不到，GET 自己就吃 400 code 24。
+      // 这不是「状态查不到」，就是「还没就绪」，跟 IN_PROGRESS 一样等下去。
+      if (errorCode(err) !== 24) {
+        log.debug(`threads container ${id} status query failed: ${describeError(err)}`);
+        return;
+      }
+      state = 'not-visible-yet';
     }
 
-    if (st.status === 'FINISHED') return;
-    // 这两个状态自己好不了，重建 container 也是同样的内容，直接抛出来
-    if (st.status === 'ERROR' || st.status === 'EXPIRED') {
-      const err = new Error(`threads container ${st.status}`);
-      err.body = { error: { code: st.status, message: st.error_message || 'no error_message' } };
-      throw err;
+    if (st) {
+      if (st.status === 'FINISHED') return;
+      // 这两个状态自己好不了，重建 container 也是同样的内容，直接抛出来
+      if (st.status === 'ERROR' || st.status === 'EXPIRED') {
+        const err = new Error(`threads container ${st.status}`);
+        err.body = { error: { code: st.status, message: st.error_message || 'no error_message' } };
+        throw err;
+      }
+      state = st.status;
     }
 
     if (Date.now() + delay > deadline) {
-      log.warn(`threads container ${id} still ${st.status} after ${timeoutMs}ms, publishing anyway`);
+      log.warn(`threads container ${id} still ${state} after ${timeoutMs}ms, publishing anyway`);
       return;
     }
-    log.debug(`threads container ${id} ${st.status}, waiting ${delay}ms`);
+    log.debug(`threads container ${id} ${state}, waiting ${delay}ms`);
     await sleep(delay);
     delay = Math.min(delay * 2, 4000);
   }
@@ -207,7 +223,7 @@ export default {
         return published && published.id;
       } catch (err) {
         lastErr = err;
-        if (!err.body || err.body.code !== 24) break;
+        if (errorCode(err) !== 24) break;
         log.warn(`threads publish attempt ${attempt}/3 failed (container 未就绪): ${describeError(err)}`);
         if (attempt < 3) await sleep(2000 * attempt);
       }
