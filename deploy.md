@@ -12,7 +12,7 @@ docker compose up -d --build
 
 `config.js` 只读挂载进容器，不进镜像也不进 git。
 
-`data/` 是可写卷，只放 Threads 的长效 token（`data/threads-token.json`）—— 这个文件丢了要重新人工授权，别跟着代码一起清。
+`data/` 是可写卷，放 Threads 的长效 token（`data/threads-token.json`）—— 这个文件丢了要重新人工授权，别跟着代码一起清；以及被 at 自动回复的处理进度（`data/threads-mentions.json`），这个丢了无所谓。
 
 ## 账号准备
 
@@ -41,6 +41,80 @@ apikey/secret 从 Frodo APK 里提取，账号密码是普通豆瓣账号。字�
    `threads.userId` 留空即可，代码用 `/me`。**不需要** redirect callback URL —— 那是 OAuth 授权码流程用的，Token Generator 直接给长效 token，绕过整个流程。
 
 首次启动会把 `threads.accessToken` 播种进 `data/threads-token.json`，**之后以这个文件为准**（config 里那份会一直停留在最初那次）。限额 250 帖/24h，我们 24 帖/天。进程每天 04:00 自动续期，每次重置 60 天，所以**离线不超过 59 天都能自己救回来**。
+
+### Threads 被 at 自动回复（可选）
+
+别人在 Threads 上 at 你时自动回一条当前时间。整份实现在 `platforms/threads/mentions.js`，
+不要了就删掉那个文件，再删掉根目录 `index.js` 末尾那段带「被 at 自动回复」注释的 import 和调用，
+别处不用动（同目录 `index.js` 为它开的三个 export 是 `post()` 自己也在用的，留着不是死代码）。
+
+**先看这条，能省掉半天：后台 Settings 里那个 `Generate Access Token` 按钮拿不到这个权限。**
+它发的 scope 是写死的一套 —— Threads API 首发时的五个（`threads_basic`、
+`threads_content_publish`、`threads_manage_replies`、`threads_read_replies`、
+`threads_manage_insights`），**跟你在 Permissions and features 里加了哪些完全无关**。
+实测：use case 里只加 2 个权限，它照样发这 5 个。首发之后新增的权限
+（`threads_manage_mentions`、`threads_delete`、`threads_keyword_search`、
+`threads_location_tagging`、`threads_profile_discovery`、`threads_share_to_instagram`）
+一个都拿不到，只能走正式 OAuth 流程在 scope 里显式要。
+
+打开方法：
+
+1. Use cases → Customize → **Permissions and features**，给这几个逐个点 Add：
+   `threads_basic`、`threads_content_publish`、`threads_manage_mentions`
+   （想接住「别人在回复里 at 你」再加 `threads_read_replies`）。
+   没 Add 的 scope 在授权时会被拒
+2. 同处 **Settings**，把**三个回调 URL 全部填上**，然后 Save：
+
+   | 字段 | 填什么 |
+   | --- | --- |
+   | Redirect Callback URLs | `https://example.com/cb` |
+   | Uninstall Callback URL | 同上（随便，不会被调用） |
+   | Delete Callback URL | 同上 |
+
+   **只填 Redirect 一个是存不上的**，会报 `Form can't be saved - Please verify all
+   information is entered correctly`，但它不告诉你缺的是哪个字段。Meta 的后端要求三个
+   同时有值 —— 这是已知行为，Meta 自己的社区论坛上有多人确认。
+   Redirect 那格是 chip 输入框，输完要让它变成蓝色标签才算数。
+
+   这个流程只走一次、纯手动，所以回调地址不需要真能收请求 —— 授权后从浏览器地址栏里
+   抄 `code` 就行。填什么就原样抄进 `config.threads.redirectUri`，
+   **两边差一个斜杠都会被拒**。
+
+   （用 `example.com` 意味着那次跳转会把 `code` 发到一台你不拥有的服务器上。
+   `code` 是一次性的、几分钟就失效，而且没有 app secret 换不出 token，风险可以忽略；
+   介意的话换成你自己的域名或 GitHub Pages 地址，效果一样。）
+3. 本机跑一次授权（在项目目录，不是容器里）：
+
+   ```bash
+   npm run threads:auth
+   ```
+
+   它会打印一个授权链接 → 用 bot 账号登录 Threads 并同意 → 浏览器跳到你填的 redirect URL
+   （那页打不开是正常的）→ 把地址栏整条 URL 复制粘回终端。脚本会自动兑换成 60 天长效 token，
+   当场打印实际拿到的权限，并写进 `data/threads-token.json`
+
+4. `config.js` 的 `threads` 里加上 `mentions` 块（字段见 `config.example.js`），`enabled: true`
+5. `docker compose up -d`
+
+注意第 3 步之后 **`config.threads.accessToken` 里那份是旧的，但不用改** —— 代码以
+`data/threads-token.json` 为准。反过来说，以后要是手滑删了那个文件，进程会拿 config 里
+那份旧 token 重新播种，mentions 又会失效，自检会报出来。
+
+拿到之后的续期跟以前一样：进程每天 04:00 自动续 60 天，离线不超过 59 天都能自己救回来，
+不用再走一遍 OAuth。
+
+**另一个坑：没拿到 `threads_manage_mentions` 的 Advanced Access 之前，`/mentions` 只返回
+App Roles 里 Threads tester 发的 at，陌生人的 at 一条都查不到。** 想让朋友试，
+得先把朋友加成 Threads Tester 并让 TA 在 Threads App 内接受邀请。
+要对所有人生效，就得做商业验证 + 给这个权限单独提 App Review，那是另一件事了。
+
+为什么是轮询不是 webhook：webhook 要公网 HTTPS 端点、签名校验、重试去重，还要求 app 处于
+**Live Mode** 且关联的 business 已验证 —— 而上面第 3 步特意让 app 留在 development mode。
+轮询没这些前提，延迟上界就是 `pollSeconds`，反而可预测；配额也不紧张，通用限额至少
+48000 次/24h，60 秒一轮只花 1440 次。回复走的是独立的 1000 条/24h 限额，与 250 帖/24h 不冲突。
+
+状态存在 `data/threads-mentions.json`（已在挂载的可写卷里），记着处理过的 mention id、
+每人的冷却时间和当天回复数。删掉它只会让它从「刚才」重新开始，不会重复刷屏。
 
 ### 长毛象（m.cmx.im）
 
@@ -121,18 +195,17 @@ docker inspect --format '{{json .State.Health}}' big-ben
 
 ## 详细排查（开 debug）
 
-`compose.yaml` 里把 `LOG_LEVEL` 改成 `debug`，能看到每个请求的 `method path -> status (耗时ms)`：
-
-```yaml
-    environment:
-      - LOG_LEVEL=debug
-```
+临时提到 `debug`，能看到每个请求的 `method path -> status (耗时ms)`：
 
 ```bash
-docker compose up -d   # 改 env 无需 --build
+LOG_LEVEL=debug docker compose up -d   # 改 env 无需 --build
 ```
 
-排查完记得改回 `info`。
+跟 `POST_ON_STARTUP` 一样是一次性的（compose.yaml 里写的是 `${LOG_LEVEL:-info}`），
+下次普通 `docker compose up -d` 自动回到 `info`，不用记得改回来。
+
+注意必须写在 `docker compose` 前面这一个命令里 —— 先 `export LOG_LEVEL=debug` 再单独
+`docker compose restart` 也可以，但 `restart` 不重新读 environment，得用 `up -d`。
 
 ## 常见故障
 
@@ -193,7 +266,15 @@ container 建好了但发布失败，日志下一行的 `container ... status=` 
 
 ### `Threads token 已于 ... 过期`
 
-离线超过 59 天，自动续期救不回来了。去 Meta 后台 User Token Generator 重新 **Generate Access Token**，填进 `config.threads.accessToken`，然后**删掉 `data/threads-token.json`** 让它重新播种，最后 `docker compose restart`。
+离线超过 59 天，自动续期救不回来了。分两种：
+
+- **用了「被 at 自动回复」** —— 重跑 `npm run threads:auth`，它直接重写 token 文件。
+  **别走下面那条**：Token Generator 发的 scope 是固定的，重新播种会把
+  `threads_manage_mentions` 弄丢，mentions 又会失效
+- **只用整点报时** —— 去 Meta 后台 User Token Generator 重新 **Generate Access Token**，
+  填进 `config.threads.accessToken`，然后**删掉 `data/threads-token.json`** 让它重新播种
+
+最后 `docker compose up -d`。
 
 ### `threads token refresh skipped: ...`
 
@@ -202,6 +283,41 @@ container 建好了但发布失败，日志下一行的 `container ... status=` 
 ### 长毛象重复发嘟
 
 不会。每条嘟带 `Idempotency-Key: guang-<YYYY-MM-DDTHH>`，服务端保存 1 小时，同一整点内重试或进程重启都只会落一条。
+
+### `mentions watcher 停了：token 里没有 threads_manage_mentions`
+
+自检拦下来的。**别去点 Generate Access Token，那个按钮给不了这个权限**（原因见上面
+「Threads 被 at 自动回复」一节）。跑 `npm run threads:auth` 走一次 OAuth，脚本最后会
+打印实际拿到的权限，缺什么一目了然。
+
+### `mentions poll failed: HTTP 500 {"code":1,"msg":"An unknown error occurred"}`
+
+如果自检被绕过了（比如 `debug_token` 自己不通）还撞上这个，八成还是同一件事：
+**Threads 在「edge 存在但 token 没这个 scope」时就回这个，不告诉你缺哪个权限。**
+别被 500 骗去查网络或等它自己好 —— 直接问 token：
+
+```bash
+TOKEN=$(docker compose exec -T big-ben node -e "process.stdout.write(require('/app/data/threads-token.json').accessToken)")
+curl -s "https://graph.threads.net/debug_token?input_token=$TOKEN&access_token=$TOKEN" | python3 -m json.tool
+unset TOKEN
+```
+
+`scopes` 里没有 `threads_manage_mentions` 就按上一条修。注意这条命令会把 token 打到终端，
+别往聊天记录/issue 里贴。
+
+对照判断：`code=100 "Tried accessing nonexisting field"` 才是「这个 edge 真不存在」，
+跟缺权限是两回事。
+
+### mentions 日志一直是 `0 in window`
+
+自检过了、也没报错，就是查不到 at：
+
+- **没拿到 Advanced Access 时只有 Threads tester 的 at 能被查到** —— 确认 at 你的那个账号
+  已经在 App Roles 里，且本人在 Threads App 内接受了邀请。这是最常见的原因
+- 私密账号发的 at 永远查不到，这是 Meta 的设计
+- 只有「@ 了你」才算 mention。别人在你帖子下回复但没打 @，走的是 replies，这条路查不到
+
+开 `LOG_LEVEL=debug` 能看到每条被跳过的 mention 和具体理由（自己发的 / 太旧 / 冷却中 / 到日上限）。
 
 ### 时间不对
 

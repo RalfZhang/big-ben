@@ -4,8 +4,10 @@ services:
     container_name: big-ben
     restart: unless-stopped
     environment:
-      # debug < info < warn < error，排查问题时改成 debug 看每个请求的耗时/状态
-      - LOG_LEVEL=info
+      # debug < info < warn < error。排查问题时临时提到 debug 看每个请求的耗时/状态：
+      #   LOG_LEVEL=debug docker compose up -d
+      # 跟 POST_ON_STARTUP 一样是一次性的，不写进文件，下次普通启动自动回到 info
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       # 留空则启动时不发帖。修完某个平台后想确认发布链路通了，就临时指定它：
       #   POST_ON_STARTUP=douban docker compose up -d
       # 可填逗号分隔的平台名，或 all。不写进文件，避免以后每次重启都发。

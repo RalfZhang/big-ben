@@ -11,19 +11,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import config from '../config.js';
-import { log, describeError } from '../lib/log.js';
-import { sleep } from '../lib/retry.js';
+import config from '../../config.js';
+import { log, describeError } from '../../lib/log.js';
+import { sleep } from '../../lib/retry.js';
 
 const cfg = config.threads || {};
 const GRAPH = 'https://graph.threads.net/v1.0';
 const REFRESH_URL = 'https://graph.threads.net/refresh_access_token';
 
 // 不指定 userId 时用 me，少填一项配置
-const owner = cfg.userId || 'me';
+export const owner = cfg.userId || 'me';
 
 export const TOKEN_FILE = process.env.THREADS_TOKEN_FILE
-  || new URL('../data/threads-token.json', import.meta.url).pathname;
+  || new URL('../../data/threads-token.json', import.meta.url).pathname;
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -60,7 +60,7 @@ function writeToken(t) {
   fs.writeFileSync(TOKEN_FILE, `${JSON.stringify(t, null, 2)}\n`);
 }
 
-async function graph(path, { method = 'GET', form, base = GRAPH } = {}) {
+export async function graph(path, { method = 'GET', form, base = GRAPH } = {}) {
   const u = new URL(`${base}${path}`);
   const init = { method, signal: AbortSignal.timeout(20000) };
 
@@ -104,7 +104,10 @@ function errorCode(err) {
 function assertNotExpired() {
   if (token.expiresAt && token.expiresAt <= Date.now()) {
     throw new Error(`Threads token 已于 ${new Date(token.expiresAt).toISOString()} 过期。`
-      + '去 Meta 后台重新 Generate Access Token，填进 config.threads.accessToken，'
+      // 用了「被 at 自动回复」的话不能走 Token Generator 那条路 ——
+      // 它发的 scope 是固定的，重新播种会把 threads_manage_mentions 弄丢
+      + '救法：跑过 npm run threads:auth 的话就再跑一次（它直接重写 token 文件）；'
+      + '否则去 Meta 后台重新 Generate Access Token，填进 config.threads.accessToken，'
       + `再删掉 ${TOKEN_FILE} 让它重新播种。`);
   }
 }
@@ -175,6 +178,57 @@ async function waitReady(id, timeoutMs = 60000) {
   }
 }
 
+// 建 container → 等就绪 → publish。整点报时和「被 at 自动回复」走的是同一条路，
+// 差别只在 form 里多不多一个 reply_to_id，所以抽出来共用（见 ./mentions.js）。
+export async function publish(form) {
+  // 第一步：建 container
+  const container = await graph(`/${owner}/threads`, { method: 'POST', form });
+  if (!container.id) throw container;
+
+  // 第二步：等它就绪
+  await waitReady(container.id);
+
+  // 第三步：发布。轮询之后一般一次就过，这个循环只兜底「container 还没就绪」(code 24)。
+  // 别的错一律抛给 index.js 的统一重试 —— 两层各重试 3 次叠起来就是 9 次请求
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const published = await graph(`/${owner}/threads_publish`, {
+        method: 'POST',
+        form: { creation_id: container.id },
+      });
+      return published && published.id;
+    } catch (err) {
+      lastErr = err;
+      if (errorCode(err) !== 24) break;
+      log.warn(`threads publish attempt ${attempt}/3 failed (container 未就绪): ${describeError(err)}`);
+      if (attempt < 3) await sleep(2000 * attempt);
+    }
+  }
+
+  // 放弃之前问一下 container 状态，失败原因通常写在 error_message 里。
+  // FINISHED 且没有 error_message 说明锅不在 container 上，这行就没必要占着 WARN
+  try {
+    const st = await graph(`/${container.id}`, { form: { fields: 'status,error_message' } });
+    const line = `threads container ${container.id} status=${st.status} ${st.error_message || ''}`.trim();
+    if (st.status === 'FINISHED' && !st.error_message) log.debug(line);
+    else log.warn(line);
+  } catch { /* 诊断用，问不到就算了 */ }
+  throw lastErr;
+}
+
+// 查这个 token 实际带了哪些权限。
+// Threads 在「edge 存在但 token 里没这个 scope」时只回一句
+// HTTP 500 code 1 "An unknown error occurred"，不告诉你缺的是哪个 ——
+// 光看报错永远查不出来，只能主动问 debug_token。mentions.js 的启动自检用。
+export async function tokenScopes() {
+  const body = await graph('/debug_token', {
+    base: 'https://graph.threads.net',
+    form: { input_token: token.accessToken },
+  });
+  return body?.data?.scopes || [];
+}
+
 export default {
   name: 'threads',
   brand: '脆脆',   // 跟账号名「脆脆大笨钟」一致，不用 Threads
@@ -200,43 +254,7 @@ export default {
       + `${new Date(token.expiresAt).toISOString().slice(0, 10)}`);
   },
 
-  async post(text) {
-    // 第一步：建 container
-    const container = await graph(`/${owner}/threads`, {
-      method: 'POST',
-      form: { media_type: 'TEXT', text },
-    });
-    if (!container.id) throw container;
-
-    // 第二步：等它就绪
-    await waitReady(container.id);
-
-    // 第三步：发布。轮询之后一般一次就过，这个循环只兜底「container 还没就绪」(code 24)。
-    // 别的错一律抛给 index.js 的统一重试 —— 两层各重试 3 次叠起来就是 9 次请求
-    let lastErr;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        const published = await graph(`/${owner}/threads_publish`, {
-          method: 'POST',
-          form: { creation_id: container.id },
-        });
-        return published && published.id;
-      } catch (err) {
-        lastErr = err;
-        if (errorCode(err) !== 24) break;
-        log.warn(`threads publish attempt ${attempt}/3 failed (container 未就绪): ${describeError(err)}`);
-        if (attempt < 3) await sleep(2000 * attempt);
-      }
-    }
-
-    // 放弃之前问一下 container 状态，失败原因通常写在 error_message 里。
-    // FINISHED 且没有 error_message 说明锅不在 container 上，这行就没必要占着 WARN
-    try {
-      const st = await graph(`/${container.id}`, { form: { fields: 'status,error_message' } });
-      const line = `threads container ${container.id} status=${st.status} ${st.error_message || ''}`.trim();
-      if (st.status === 'FINISHED' && !st.error_message) log.debug(line);
-      else log.warn(line);
-    } catch { /* 诊断用，问不到就算了 */ }
-    throw lastErr;
+  post(text) {
+    return publish({ media_type: 'TEXT', text });
   },
 };

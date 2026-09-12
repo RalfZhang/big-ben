@@ -9,7 +9,7 @@ import { beat } from './lib/heartbeat.js';
 import { sleep, isRetryable } from './lib/retry.js';
 import { getText, idempotencyKey, now } from './lib/text.js';
 import douban from './platforms/douban.js';
-import threads from './platforms/threads.js';
+import threads from './platforms/threads/index.js';
 import mastodon from './platforms/mastodon.js';
 
 const platforms = [douban, threads, mastodon].filter((p) => p.enabled);
@@ -143,3 +143,12 @@ if (threads.enabled) {
     catch (err) { log.error(`threads token refresh failed: ${describeError(err)}`); }
   });
 }
+
+// ---- 被 at 自动回复当前时间（可选功能）----------------------------------
+// 整份实现在 ./platforms/threads/mentions.js。不要了，把下面这两行连同本段注释一起删掉即可，
+// 别处不用动。import 写在这里而不是文件顶上，就是为了删的时候不用翻两个地方 ——
+// ESM 的 import 声明在模块顶层的任何位置都会被提升，放这儿和放开头等价。
+import { startMentionWatcher } from './platforms/threads/mentions.js';
+startMentionWatcher();
+// -------------------------------------------------------------------------
+
