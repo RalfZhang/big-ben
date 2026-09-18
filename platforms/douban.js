@@ -1,8 +1,5 @@
-/**
- * 豆瓣：伪装 Android 客户端（Frodo）打 frodo.douban.com。
- * 签名算法、UA 字段顺序、写请求参数放 body / 读请求放 query 的分流，
- * 全都是对着真机抓包调出来的，改动前先抓包确认。
- */
+// 豆瓣：伪装 Android 客户端（Frodo）打 frodo.douban.com。
+// 签名算法、UA 字段顺序、参数放 body 还是 query 都是对着真机抓包调出来的，改动前先抓包确认。
 import crypto from 'node:crypto';
 
 import config from '../config.js';
@@ -18,7 +15,7 @@ async function frodoRequest({ url, method = 'GET', form }) {
   const device = cfg.api.device;
 
   const headers = {
-    // 对齐真机抓包的 UA：带 udid + douban_udid，字段顺序也一致
+    // 对齐真机抓包，字段顺序也一致
     'User-Agent':
       `api-client/1 com.douban.frodo/7.130.0.beta2(357) Android/${device.sdkInt}` +
       `  udid/${device.id}  douban_udid/${device.doubanId}` +
@@ -34,7 +31,7 @@ async function frodoRequest({ url, method = 'GET', form }) {
   const isWrite = ['PATCH', 'POST', 'PUT'].includes(method);
   const body = isWrite ? new URLSearchParams(form || {}) : null;
 
-  // 对齐真机：写请求把公共/鉴权参数放 body，读请求放 query
+  // 对齐真机：写请求的公共参数放 body，读请求放 query
   const addParam = (name, value) => {
     if (isWrite) body.set(name, value);
     else u.searchParams.set(name, value);
@@ -81,8 +78,8 @@ async function frodoRequest({ url, method = 'GET', form }) {
   return parsed;
 }
 
+// 真机启动时会先注册设备再登录
 async function registerDevice() {
-  // 真机启动时会先注册设备（device_id + douban_udid），再登录
   try {
     await frodoRequest({
       url: 'https://frodo.douban.com/api/v2/register_device',
@@ -114,8 +111,8 @@ async function authenticate() {
   log.info(`douban authenticated as ${body.douban_user_name || body.douban_user_id}`);
 }
 
-// 新版豆瓣发广播用 /api/v2/topic/post（旧的 status/create_status 已废弃，返回 999）。
-// 正文是 Draft.js 结构的 content JSON。
+// 新版发广播用 /api/v2/topic/post（旧的 status/create_status 已废弃，返回 999），
+// 正文是 Draft.js 结构的 JSON
 function buildContent(text) {
   return JSON.stringify({
     blocks: [{

@@ -1,12 +1,9 @@
 /**
  * Threads：官方 Graph API，两步发布（先建 container，再 publish）。
  *
- * 唯一有状态的平台：长效 token 60 天过期，必须落盘 —— 只放内存的话
- * 进程一重启就丢掉已经续期过的 token，最终会静默过期。
- *
- * 初始 token 直接在 Meta 后台「User Token Generator」点 Generate Access Token 拿到，
- * 填进 config.threads.accessToken 即可（不用走 OAuth 授权码流程）。首次启动会把它
- * 播种进 data/threads-token.json，之后以文件为准，进程每天自己续期。
+ * 唯一有状态的平台：长效 token 60 天过期，必须落盘，否则重启就丢掉已续期的那份。
+ * 初始 token 从 config.threads.accessToken 播种进 data/threads-token.json，
+ * 之后以文件为准，进程每天自己续期。拿 token 的几条路见 deploy.md。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,7 +16,6 @@ const cfg = config.threads || {};
 const GRAPH = 'https://graph.threads.net/v1.0';
 const REFRESH_URL = 'https://graph.threads.net/refresh_access_token';
 
-// 不指定 userId 时用 me，少填一项配置
 export const owner = cfg.userId || 'me';
 
 export const TOKEN_FILE = process.env.THREADS_TOKEN_FILE
@@ -36,15 +32,14 @@ function readToken() {
   return t;
 }
 
-// 首次启动：state 文件还不存在，就拿 config 里的 token 播种。
-// 播种后以文件为准 —— 续期写的是文件，config 里那个会一直是最初那份。
+// 首次启动：文件还不存在，拿 config 里的 token 播种。之后以文件为准
 function seedToken() {
   if (!cfg.accessToken) {
     throw new Error('config.threads.accessToken 是空的 —— 去 Meta 后台 '
       + 'Use cases → Customize → Settings → User Token Generator 点 Generate Access Token');
   }
-  // Token Generator 给的就是 60 天长效 token。以播种时刻当签发时刻：
-  // 刚生成的 token 不满 24 小时，这时候去续期 Meta 会直接拒，所以不能记成 0。
+  // Token Generator 给的就是 60 天长效 token。refreshedAt 记成现在而不是 0：
+  // 不满 24 小时的 token 去续期会被 Meta 直接拒
   const t = {
     accessToken: cfg.accessToken,
     expiresAt: Date.now() + 60 * DAY,
@@ -58,6 +53,17 @@ function seedToken() {
 function writeToken(t) {
   fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
   fs.writeFileSync(TOKEN_FILE, `${JSON.stringify(t, null, 2)}\n`);
+}
+
+// 自己的 username，两个 watcher 靠它认出「这条是自己发的」（自己回自己是死循环）。
+// init() 已经查过一次并缓存，这里通常不发请求
+let selfName = null;
+
+export async function whoami() {
+  if (selfName) return selfName;
+  const me = await graph(`/${owner}`, { form: { fields: 'username' } });
+  selfName = String(me.username || '').toLowerCase();
+  return selfName;
 }
 
 export async function graph(path, { method = 'GET', form, base = GRAPH } = {}) {
@@ -92,26 +98,22 @@ export async function graph(path, { method = 'GET', form, base = GRAPH } = {}) {
   return parsed;
 }
 
-// Meta 的错误体是 { error: { code, message } }，错误码埋在 error 里 ——
-// 直接读 err.body.code 永远是 undefined，code 24 的判断会全部失效。
-function errorCode(err) {
+// Meta 的错误码埋在 { error: { code } } 里，直接读 err.body.code 永远是 undefined
+export function errorCode(err) {
   return err?.body?.error?.code ?? err?.body?.code;
 }
 
-// token 满 24 小时才允许续期；每次续期重新计 60 天，
-// 所以只要离线不超过 59 天，回来都还能自动救回来。
 // 过期是本地就能判定的死局，救法明确，值得单独报出来
 function assertNotExpired() {
   if (token.expiresAt && token.expiresAt <= Date.now()) {
     throw new Error(`Threads token 已于 ${new Date(token.expiresAt).toISOString()} 过期。`
-      // 用了「被 at 自动回复」的话不能走 Token Generator 那条路 ——
-      // 它发的 scope 是固定的，重新播种会把 threads_manage_mentions 弄丢
       + '救法：跑过 npm run threads:auth 的话就再跑一次（它直接重写 token 文件）；'
       + '否则去 Meta 后台重新 Generate Access Token，填进 config.threads.accessToken，'
       + `再删掉 ${TOKEN_FILE} 让它重新播种。`);
   }
 }
 
+// 满 24 小时才允许续期，每次续期重新计 60 天
 async function maybeRefresh() {
   if (!token) token = readToken();
   assertNotExpired();
@@ -134,10 +136,9 @@ async function maybeRefresh() {
   log.info(`threads token refreshed, expires ${new Date(token.expiresAt).toISOString().slice(0, 10)}`);
 }
 
-// 纯文本 container 并不是立即就绪的：实测建完马上 publish 会吃一个 HTTP 400 code 24
-// （查状态是 IN_PROGRESS），要等几秒。先轮询到 FINISHED 再发，省掉那次必然失败的 publish。
-// code 24 无论出现在查状态还是 publish，含义都一样：还没就绪，等就完了。
-// 别的错才是真查不到状态，那就直接往下走，让 publish 自己去撞。
+// container 不是建完就能发的：实测马上 publish 会吃 HTTP 400 code 24，要等几秒。
+// code 24 无论出现在查状态还是 publish，都是「还没就绪」；别的错才是真查不到，
+// 那就直接往下走，让 publish 自己去撞
 async function waitReady(id, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   let delay = 500;
@@ -148,8 +149,7 @@ async function waitReady(id, timeoutMs = 60000) {
     try {
       st = await graph(`/${id}`, { form: { fields: 'status,error_message' } });
     } catch (err) {
-      // 刚建出来的头几秒 container 连查都查不到，GET 自己就吃 400 code 24。
-      // 这不是「状态查不到」，就是「还没就绪」，跟 IN_PROGRESS 一样等下去。
+      // 头几秒 container 连查都查不到，GET 自己就吃 code 24，等同 IN_PROGRESS
       if (errorCode(err) !== 24) {
         log.debug(`threads container ${id} status query failed: ${describeError(err)}`);
         return;
@@ -159,7 +159,7 @@ async function waitReady(id, timeoutMs = 60000) {
 
     if (st) {
       if (st.status === 'FINISHED') return;
-      // 这两个状态自己好不了，重建 container 也是同样的内容，直接抛出来
+      // 这两个状态自己好不了，重建也是同样的内容，直接抛出来
       if (st.status === 'ERROR' || st.status === 'EXPIRED') {
         const err = new Error(`threads container ${st.status}`);
         err.body = { error: { code: st.status, message: st.error_message || 'no error_message' } };
@@ -178,18 +178,16 @@ async function waitReady(id, timeoutMs = 60000) {
   }
 }
 
-// 建 container → 等就绪 → publish。整点报时和「被 at 自动回复」走的是同一条路，
-// 差别只在 form 里多不多一个 reply_to_id，所以抽出来共用（见 ./mentions.js）。
+// 建 container → 等就绪 → publish。报时和两个自动回复走同一条路，
+// 差别只在 form 里多不多一个 reply_to_id
 export async function publish(form) {
-  // 第一步：建 container
   const container = await graph(`/${owner}/threads`, { method: 'POST', form });
   if (!container.id) throw container;
 
-  // 第二步：等它就绪
   await waitReady(container.id);
 
-  // 第三步：发布。轮询之后一般一次就过，这个循环只兜底「container 还没就绪」(code 24)。
-  // 别的错一律抛给 index.js 的统一重试 —— 两层各重试 3 次叠起来就是 9 次请求
+  // 轮询之后一般一次就过，这个循环只兜底 code 24。别的错一律抛给 index.js 的统一重试，
+  // 免得两层各 3 次叠成 9 次请求
   let lastErr;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -206,8 +204,8 @@ export async function publish(form) {
     }
   }
 
-  // 放弃之前问一下 container 状态，失败原因通常写在 error_message 里。
-  // FINISHED 且没有 error_message 说明锅不在 container 上，这行就没必要占着 WARN
+  // 放弃之前问一下状态，失败原因通常写在 error_message 里。
+  // FINISHED 且没有 error_message 说明锅不在 container 上，不值得占着 WARN
   try {
     const st = await graph(`/${container.id}`, { form: { fields: 'status,error_message' } });
     const line = `threads container ${container.id} status=${st.status} ${st.error_message || ''}`.trim();
@@ -217,10 +215,8 @@ export async function publish(form) {
   throw lastErr;
 }
 
-// 查这个 token 实际带了哪些权限。
-// Threads 在「edge 存在但 token 里没这个 scope」时只回一句
-// HTTP 500 code 1 "An unknown error occurred"，不告诉你缺的是哪个 ——
-// 光看报错永远查不出来，只能主动问 debug_token。mentions.js 的启动自检用。
+// token 里少一个 scope 时，Threads 只回 HTTP 500 code 1 "An unknown error occurred"，
+// 不告诉你缺哪个 —— 只能主动问 debug_token。两个 watcher 的启动自检用
 export async function tokenScopes() {
   const body = await graph('/debug_token', {
     base: 'https://graph.threads.net',
@@ -231,7 +227,7 @@ export async function tokenScopes() {
 
 export default {
   name: 'threads',
-  brand: '脆脆',   // 跟账号名「脆脆大笨钟」一致，不用 Threads
+  brand: '脆脆',   // 跟账号名「脆脆大笨钟」一致
   enabled: Boolean(cfg.enabled),
   maybeRefresh,
 
@@ -241,8 +237,8 @@ export default {
 
     assertNotExpired();
 
-    // 续期失败不代表现在这个 token 不能用（比如刚播种的 token 还不满 24 小时），
-    // 真正说了算的是下面这次 /me —— 所以这里只警告，不中断。
+    // 续期失败不代表这个 token 不能用（比如刚播种的还不满 24 小时），
+    // 说了算的是下面那次 /me
     try {
       await maybeRefresh();
     } catch (err) {
@@ -250,6 +246,7 @@ export default {
     }
 
     const me = await graph(`/${owner}`, { form: { fields: 'id,username' } });
+    selfName = String(me.username || '').toLowerCase();
     log.info(`threads authenticated as @${me.username} (id=${me.id}), token expires `
       + `${new Date(token.expiresAt).toISOString().slice(0, 10)}`);
   },

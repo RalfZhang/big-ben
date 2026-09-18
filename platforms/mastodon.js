@@ -1,7 +1,4 @@
-/**
- * 长毛象（Mastodon）：标准 REST API，token 从「偏好设置 → 开发 → 新建应用」直接拿，
- * scope 只需要 write:statuses，token 不过期，所以这个 adapter 是无状态的。
- */
+// 长毛象：标准 REST API，token 不过期（scope 只要 write:statuses），adapter 无状态。
 import config from '../config.js';
 import { log } from '../lib/log.js';
 
@@ -45,15 +42,13 @@ export default {
   async init() {
     const me = await api('/api/v1/accounts/verify_credentials');
     log.info(`mastodon authenticated as @${me.username}@${new URL(base).host} (bot=${me.bot})`);
-    // 实例规则要求机器人账户如实标注，没勾上的话提醒一下
     if (!me.bot) log.warn('mastodon account is not flagged as a bot — 请在账号设置里勾选「这是一个机器人账户」');
   },
 
   async post(text, ctx) {
     const body = await api('/api/v1/statuses', {
       method: 'POST',
-      // 服务端保存 1 小时，同一整点内重试/重启都不会重复发嘟。
-      // key 由 index.js 按「整点报时 / 启动播报」分别生成，两者不能撞（撞了后发的会被静默去重）
+      // 服务端缓存 1 小时，同一整点内重试/重启都不会重复发嘟（key 见 lib/text.js）
       headers: { 'Idempotency-Key': ctx.idempotencyKey },
       form: { status: text, visibility: 'public', language: 'zh' },
     });

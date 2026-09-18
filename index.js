@@ -16,9 +16,8 @@ const platforms = [douban, threads, mastodon].filter((p) => p.enabled);
 
 const once = process.argv.includes('--once');
 
-// POST_ON_STARTUP：逗号分隔的平台名（douban / threads / mastodon），或 all；
-// 空 / 0 / false 则不发。用途是修完某个平台重启后只让它发一条，确认发布链路真的通了 ——
-// 全发的话另外两个平台就是白噪音。
+// POST_ON_STARTUP：逗号分隔的平台名或 all，空 / 0 / false 则不发。
+// 用途是修完某个平台重启后只让它发一条，确认发布链路真的通了
 function startupTargets() {
   const raw = (process.env.POST_ON_STARTUP || '').trim().toLowerCase();
   if (!raw || raw === '0' || raw === 'false') return [];
@@ -35,9 +34,8 @@ function startupTargets() {
 
 const MAX_ATTEMPTS = 3;
 
-// 单个平台的一次投递。失败只影响自己，并标记下轮重新 init。
-// 实例 500、限流、网络抖动都是「下一秒就好了」的错，一次就放弃等于白丢一个整点，
-// 所以在这里统一退避重试 —— 各平台 adapter 只管把错误如实抛出来。
+// 单个平台的一次投递，失败只影响自己。5xx / 限流 / 网络抖动一次就放弃等于白丢一个整点，
+// 所以重试统一在这里做，adapter 只管把错误如实抛出来
 async function deliver(p, text, ctx) {
   const started = Date.now();
   let lastErr;
@@ -54,21 +52,21 @@ async function deliver(p, text, ctx) {
       return;
     } catch (err) {
       lastErr = err;
-      // 这里不动 p.ready：能进重试的都是 5xx / 限流 / 网络抖动，重登一遍没有意义。
-      // 真正需要重登的错（token 失效）是 4xx，不可重试，会直接落到下面
+      // 不动 p.ready：能进重试的都是 5xx / 限流 / 网络抖动，重登没意义；
+      // 真要重登的（token 失效）是 4xx，会直接落到下面
       if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) break;
       log.warn(`${p.name} attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying: ${describeError(err)}`);
       await sleep(2000 * attempt);
     }
   }
 
-  // 彻底失败，标记下轮重新 init —— token 失效这类问题靠重登自愈
+  // 标记下轮重新 init —— token 失效这类问题靠重登自愈
   p.ready = false;
   log.error(`${p.name} FAILED (${Date.now() - started}ms): ${describeError(lastErr)}`);
   throw lastErr;
 }
 
-// makeText 收到同一个 at，保证各平台报的进度百分比逐字一致
+// 各平台共用同一个 at，保证报的进度百分比逐字一致
 async function postRound(makeText, { at = now(), targets = platforms, kind = 'hourly' } = {}) {
   const ctx = { at, kind, idempotencyKey: idempotencyKey(kind, at) };
   const results = await Promise.allSettled(
@@ -85,7 +83,7 @@ async function postHourly() {
   await postRound((p, t) => getText(p.brand, t), { at });
 }
 
-// 兜底：进程级异常也要留下日志，方便容器重启后回溯
+// 进程级异常也要留下日志，方便容器重启后回溯
 process.on('unhandledRejection', (reason) => {
   log.error(`unhandledRejection: ${describeError(reason instanceof Error ? reason : { message: String(reason) })}`);
 });
@@ -103,8 +101,8 @@ if (!platforms.length) {
 log.info(`platforms: ${platforms.map((p) => p.name).join(', ')}`);
 beat();
 
-// 启动时先把各平台登上，问题当场暴露；但登不上不能拖垮进程 ——
-// 否则配合 restart: unless-stopped 就是无限重启，下个整点自会重试。
+// 启动时先登一遍让问题当场暴露，但登不上不能退出 ——
+// 配合 restart: unless-stopped 就是无限重启，下个整点自会重试
 await Promise.allSettled(platforms.map(async (p) => {
   try {
     await p.init();
@@ -130,7 +128,7 @@ if (startup.length) {
 
 ns.scheduleJob('0 * * * *', postHourly);
 
-// screen detach 无任务 1 小时后不执行 schedule，添加每十分钟唤醒；顺便刷新心跳
+// screen detach 无任务 1 小时后不执行 schedule，每十分钟唤醒一次；顺便刷新心跳
 ns.scheduleJob('30 */10 * * * *', () => {
   log.debug('wakeup tick');
   beat();
@@ -144,11 +142,12 @@ if (threads.enabled) {
   });
 }
 
-// ---- 被 at 自动回复当前时间（可选功能）----------------------------------
-// 整份实现在 ./platforms/threads/mentions.js。不要了，把下面这两行连同本段注释一起删掉即可，
-// 别处不用动。import 写在这里而不是文件顶上，就是为了删的时候不用翻两个地方 ——
-// ESM 的 import 声明在模块顶层的任何位置都会被提升，放这儿和放开头等价。
+// 两个可选功能：被 at 自动回复、评论区自动回复。不要了就把对应的两行删掉，
+// 别处不用动（quota.js / replied.js 两者共用，别跟着删）。
+// import 放这儿是为了删的时候不用翻两个地方 —— ESM 的 import 会提升，跟放开头等价。
 import { startMentionWatcher } from './platforms/threads/mentions.js';
 startMentionWatcher();
-// -------------------------------------------------------------------------
+
+import { startReplyWatcher } from './platforms/threads/reply.js';
+startReplyWatcher();
 

@@ -12,6 +12,10 @@ services:
       #   POST_ON_STARTUP=douban docker compose up -d
       # 可填逗号分隔的平台名，或 all。不写进文件，避免以后每次重启都发。
       - POST_ON_STARTUP=${POST_ON_STARTUP:-}
+      # 评论区自动回复只打印不发，用来第一次上线或改完提示词后看一眼：
+      #   REPLY_DRY_RUN=1 docker compose up -d
+      # 同样是一次性的，下次普通启动自动回到真实发送
+      - REPLY_DRY_RUN=${REPLY_DRY_RUN:-}
     volumes:
       # config.js 不进镜像，运行时只读挂载；改完跑 docker compose restart 即可
       - ./config.js:/app/config.js:ro

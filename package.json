@@ -16,6 +16,7 @@
   "scripts": {
     "start": "node index.js",
     "once": "node index.js --once",
-    "threads:auth": "node platforms/threads/authorize.js"
+    "threads:auth": "node platforms/threads/authorize.js",
+    "threads:reply:try": "node platforms/threads/reply-try.js"
   }
 }

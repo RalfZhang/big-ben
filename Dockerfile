@@ -17,6 +17,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY index.js healthcheck.js ./
 COPY lib ./lib
 COPY platforms ./platforms
+COPY services ./services
 
 # Threads token 要落盘续期，这个目录必须对 node 用户可写
 RUN mkdir -p /app/data && chown -R node:node /app/data

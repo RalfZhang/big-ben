@@ -12,7 +12,7 @@ docker compose up -d --build
 
 `config.js` 只读挂载进容器，不进镜像也不进 git。
 
-`data/` 是可写卷，放 Threads 的长效 token（`data/threads-token.json`）—— 这个文件丢了要重新人工授权，别跟着代码一起清；以及被 at 自动回复的处理进度（`data/threads-mentions.json`），这个丢了无所谓。
+`data/` 是可写卷，放 Threads 的长效 token（`data/threads-token.json`）—— 这个文件丢了要重新人工授权，别跟着代码一起清；以及几个自动回复的处理进度（`threads-mentions.json`、`threads-replies.json`、`threads-replied.json`），这几个丢了无所谓，最坏是重复回几条。
 
 ## 账号准备
 
@@ -115,6 +115,83 @@ App Roles 里 Threads tester 发的 at，陌生人的 at 一条都查不到。**
 
 状态存在 `data/threads-mentions.json`（已在挂载的可写卷里），记着处理过的 mention id、
 每人的冷却时间和当天回复数。删掉它只会让它从「刚才」重新开始，不会重复刷屏。
+
+跟下面那个「评论区自动回复」共用两样东西，别把它们当成本功能的私有物：
+`data/threads-replied.json`（判重账本）和 24 小时回复配额闸门
+（`platforms/threads/quota.js`）。`mentions.dailyCap` 只是本功能的子上限。
+
+### Threads 评论区自动回复（可选）
+
+别人在你帖子底下回复时自动回一句：
+
+| 对方说什么 | 回什么 |
+| --- | --- |
+| 问时间（「几点了」「现在什么时间」「报个时」…… 任何说法、任何语言） | `咣！脆脆大笨钟提醒您：现在是北京时间 2026-09-18 08:00:00。` |
+| 其他任何内容 | 交给 Google Gemini 现编一句（略微调皮、有点抽象的老钟口吻） |
+
+实现分两层：`platforms/threads/reply.js` 管「回不回、回什么」，
+`services/ai.js` + `services/gemini.js` 管「问哪个模型」。以后想加第二家模型兜底，
+照 `gemini.js` 的形状写一个模块塞进 `services/ai.js` 的 `PROVIDERS` 数组即可，顺序就是优先级。
+
+不要了，两步删干净：删掉 `platforms/threads/reply.js` 和 `reply-try.js`，再删掉根目录
+`index.js` 末尾那段带「评论区自动回复」注释的 import 和调用。
+**`platforms/threads/quota.js` 和 `replied.js` 是跟 `mentions.js` 共用的，别跟着删。**
+
+打开方法：
+
+1. 权限：Meta 后台 Use cases → Customize → Permissions and features 里 Add 上
+   `threads_read_replies`，然后跑一次 `npm run threads:auth`（跟上面 mentions 那节同一个流程，
+   `authorize.js` 的默认 scope 里已经有它了）。读别人的回复要这个权限；**发**回复走的是
+   发帖那条路，不需要额外权限
+2. 模型 key：https://aistudio.google.com/apikey 点一下就有，免费档够用，填进 `config.ai.gemini.apiKey`
+3. `config.threads.reply.enabled` 改成 `true`
+4. **先干跑一遍**：照常拉取、照常编，但只把「准备回什么」打进日志，一条都不发 ——
+
+   ```bash
+   REPLY_DRY_RUN=1 docker compose up -d
+   docker compose logs -f big-ben | grep dry-run
+   ```
+
+   看着顺眼了再 `docker compose up -d` 切回真实发送。注意干跑也会把看过的评论记进 seen，
+   所以切回去之后不会把刚才那些补发一遍
+5. 想单独调语气，不用等真有人回复：
+
+   ```bash
+   npm run threads:reply:try -- "打卡"
+   npm run threads:reply:try -- "几点了"          # 走本地判断，连 AI 都不问
+   npm run threads:reply:try -- "你是不是个机器人"  # 看看会不会破功
+   ```
+
+   这个只调 AI，完全不碰 Threads。人格提示词就在 `reply.js` 的 `persona()` 里
+
+**跟 mentions 的分工**：mentions 查 `/mentions`（别人 @ 我，帖子可能发在任何地方），
+本功能翻自己帖子的 `/conversation`（别人回我，不一定打 @）。
+「在我帖子底下回复又打了 @」的评论两边都会看到，靠 `data/threads-replied.json`
+这本共享账本判重，不会挂两条。另外 `reply.js` 还会顺便看一眼「这条评论底下是不是已经有我的回复了」
+（`is_reply_owned_by_me` + `replied_to`），所以连状态文件一起丢了也不会重复回。
+
+**一个意外的好处**：`/conversation` 读的是自己的帖子，不像 `/mentions` 那样卡
+Advanced Access —— **陌生人的回复能正常拉到**。也就是说在没做 App Review 之前，
+这个功能是唯一能对普通人生效的互动路径。
+
+配额（这是本功能最需要盯的地方）：
+
+- Threads 给「API 发出的回复」单独一档 **1000 条 / 24 小时滑动窗口**。
+  整点敲钟不花这个池子 —— 发帖是另一档 250 条/24h，两者互不相干
+- `quota.js` 不自己数，直接问服务端真实用量
+  （`GET /me/threads_publishing_limit?fields=reply_quota_usage,reply_config`），
+  缓存一分钟，再扣掉 `config.threads.replyQuotaHeadroom`（默认 100）。
+  所以实际闸门是 **900 条/24h**，剩下 100 条留给手动操作和以后加的功能
+- 问服务端而不是自己记，顺带解决三件事：重启后计数不清零、滑动窗口跟自然日对不上、
+  在 App 里手动回的复也算进去
+- 两个 watcher 共用这个闸门；`mentions.dailyCap` / `reply.dailyCap` 是各自的子上限，
+  防的是「一路把一天的额度吃干」
+- 万一 `threads_publishing_limit` 查不到，会退回各自的 `dailyCap` 兜着，并打一条 WARN，
+  不会因此停摆
+
+请求量：每轮 1 次「列最近的帖子」+ 每个有人回复过的帖子 1 次「拉会话」。
+默认 60 秒一轮、只看最近 3 小时（也就是最多 3 条帖子），每轮最多 4 次，一天约 5800 次；
+Threads 通用限额至少 48000 次/24h，加上 mentions 那路也还宽裕。
 
 ### 长毛象（m.cmx.im）
 
@@ -318,6 +395,48 @@ unset TOKEN
 - 只有「@ 了你」才算 mention。别人在你帖子下回复但没打 @，走的是 replies，这条路查不到
 
 开 `LOG_LEVEL=debug` 能看到每条被跳过的 mention 和具体理由（自己发的 / 太旧 / 冷却中 / 到日上限）。
+
+### `reply watcher 停了：token 里没有 threads_read_replies`
+
+跟 mentions 那条同一个套路：后台的 `Generate Access Token` 按钮给不了新权限，
+去 Permissions and features 里 Add 上，然后 `npm run threads:auth` 重新授权。
+
+### `ai: gemini 失败，静音 10 分钟：...`
+
+不可重试的错才会静音（静音是为了别让每分钟一轮的 watcher 把同一条错刷几千行）。
+看错误体里的 `msg`：
+
+| 现象 | 原因 |
+| --- | --- |
+| HTTP 404 | `config.ai.gemini.model` 这个模型名不存在（Google 换代改名了），去 AI Studio 对一下 |
+| HTTP 400 `API_KEY_INVALID` | key 抄错了或已撤销 |
+| HTTP 403 | key 没开 Generative Language API，或所在地区不支持 |
+| HTTP 429 | 免费档限速。**这个算可重试，不会静音**，下一轮自己再来 |
+
+静音到期会自动再试一次，所以改完 `config.js` 重启更快，不改也不至于永久瘫掉。
+
+### `gemini 没给出文本：maxOutputTokens 太小，思考把额度吃光了`
+
+新一点的模型默认先「思考」，思考的 token 也从 `maxOutputTokens` 里扣。
+在 `config.ai.gemini.generationConfig` 里调大 `maxOutputTokens`，或者干脆关掉思考
+（2.5 系 `{ thinkingConfig: { thinkingBudget: 0 } }`，3.x 系
+`{ thinkingConfig: { thinkingLevel: 'low' } }`）。这块是原样透传给 Gemini 的。
+
+### `reply: ... 自曝身份，这条不发：...`
+
+提示词里写了「绝对禁止承认自己是 bot」，但模型偶尔还是会破功。这是代码里那道防线
+（`reply.js` 的 `SELF_OUTING`）拦下来的：这条不发，当成一次失败，下一轮重新生成 ——
+温度是 1，重来一次大概率就正常了，连着三次都破功才放弃那条评论。
+
+### 评论区一条都不回
+
+按顺序看日志：
+
+- `reply watcher off` —— `config.threads.reply.enabled` 没开
+- `REPLY_DRY_RUN 开着` —— 干跑模式，本来就不发
+- `reply: N/M 条帖子有回复, ... 0 回复, 0 跳过` —— 没人在窗口内回复。
+  `maxAgeMinutes`（默认 30）之外的回复不补发，这是故意的：停机一天回来别把积压的全刷一遍
+- `skip ... —— 冷却里 / 到上限了 / 配额用完了` —— 开 `LOG_LEVEL=debug` 就能看到每条被跳过的理由
 
 ### 时间不对
 

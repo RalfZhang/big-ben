@@ -1,8 +1,5 @@
-/**
- * Docker HEALTHCHECK：心跳文件在 STALE_MS 内更新过则视为健康。
- * index.js 启动时和每 10 分钟唤醒时各写一次心跳，
- * 这里给到 15 分钟容差，超时即判定进程卡死，由 restart 策略拉起。
- */
+// Docker HEALTHCHECK：心跳在 STALE_MS 内更新过则健康。
+// index.js 每 10 分钟写一次，超时即判定卡死，交给 restart 策略拉起。
 import fs from 'node:fs';
 
 const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || '/tmp/big-ben.heartbeat';
