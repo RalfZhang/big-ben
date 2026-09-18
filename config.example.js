@@ -47,7 +47,10 @@ export default {
       maxAgeMinutes: 30,        // 超过这个岁数的回复不回
       userCooldownSeconds: 60,  // 同一个人的冷却
       dailyCap: 300,            // 本功能每天回复上限
-      maxTextLength: 480        // 回复截断长度（Threads 单条上限 500 字符）
+      maxTextLength: 480,       // 回复截断长度（Threads 单条上限 500 字符）
+      // 判断和编回复之前，把同一评论串里往前数的几条消息一起喂给 AI，它才看得懂
+      // 「好吧」是聊完了还是刚搭上话。免费档模型别给太多，0~8，0 = 关掉
+      contextMessages: 4
     },
 
     // 两个自动回复功能共用 Threads 的「1000 条回复/24h」池子，这里预扣掉留给手动操作。
