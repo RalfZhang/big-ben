@@ -59,6 +59,9 @@ const SKIP_MARKER = '__SKIP__';
 // 每条上下文截到这么长。4 条 × 120 字 = 500 字上下，免费档模型吃得消也不至于跑偏
 const CONTEXT_CHARS = 120;
 
+// 原帖单独放一段、不占 contextMessages 的名额，给得宽一点 —— 评论多半是冲着它来的
+const POST_CHARS = 300;
+
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 const pollSec = Math.max(15, Number(cfg.pollSeconds) || 60);
@@ -171,11 +174,11 @@ function persona(at, engaged) {
     `现在是北京时间 ${at.format('YYYY-MM-DD HH:mm:ss')}，${WEEKDAYS[at.day()]}。`,
     '',
     '有人在你的帖子底下回复，你要回她一句。规矩：',
-    '1. 语气略微调皮、有点抽象，可以用中文互联网上比较新的玩梗说法，但别用过时的老梗，'
+    '1. 语气抽象，已读乱回，可以用中文互联网上最新的玩梗说法，一定别用过时的老梗，'
       + '别硬凑热梗，别油腻，别堆 emoji。',
-    '2. 短。一句最佳，必要时可以两句或更多，最多 60 个字。不分行，不用 markdown，不加话题标签，'
+    '2. 短。一句最佳，尽量控制在 15 字以内，必要时可以两句，最多 40 个字。不分行，不用 markdown，不加话题标签，'
       + '不 @ 任何人。',
-    '3. 你就是一口钟 —— 成天报时、见多识广、多少有点上班摸鱼感的小钟，可以自称「我」。',
+    '3. 你就是一口掌握互联网抽象玩法的钟，可以自称「我」。',
     '4. 绝对禁止透露或暗示自己是 bot、AI、机器人、程序、脚本、模型、自动回复。'
       + '被直接质问也要自然地糊过去，绝不承认，也别主动提这几个词。',
     '5. 用对方说话的语言回复，也可以一定程度上学习对方的语言风格。',
@@ -204,8 +207,20 @@ function contextLine(c) {
 }
 
 function userPrompt(m) {
-  const chain = (Array.isArray(m.context) ? m.context : []).filter((c) => String(c.text || '').trim());
+  const all = (Array.isArray(m.context) ? m.context : []).filter((c) => String(c.text || '').trim());
+  const post = all.find((c) => c.root);
+  const chain = all.filter((c) => !c.root);
   const out = [];
+
+  if (post) {
+    out.push(
+      '你发的原帖（大家是在它底下回复的）：',
+      '--- 原帖开始 ---',
+      oneLine(post.text, POST_CHARS),
+      '--- 原帖结束 ---',
+      '',
+    );
+  }
 
   if (chain.length) {
     out.push(
@@ -338,6 +353,7 @@ async function conversationOf(postId) {
 // ---- 上下文 --------------------------------------------------------------
 
 // 顺着 replied_to 一路往上爬，取这条评论前面最多 contextMax 条，返回正序。
+// 原帖（root）不占名额：楼盖得再深也一路爬到顶把它捞上，放在最前面。
 // byId 是这一轮已经拉到手的全部会话（含自己发的和根帖），所以不用额外发请求 ——
 // 爬出这个范围（比如上文在 lookbackHours 之外的老帖里）就到此为止，有多少给多少。
 // 导出是为了能不连网单独试（byId 是 Map: id -> { text, username, mine, parent }）
@@ -346,15 +362,23 @@ export function chainOf(item, byId) {
   const walked = new Set([String(item.id)]);
   let pid = item.replied_to?.id ? String(item.replied_to.id) : '';
 
-  while (pid && out.length < contextMax && !walked.has(pid)) {
+  let root = null;
+
+  // 名额满了也接着爬，只是不再收 —— 全在内存里，爬到顶也就几步
+  while (pid && !walked.has(pid)) {
     walked.add(pid);
     const node = byId.get(pid);
     if (!node) break;
-    out.push(node);
+    if (node.root) {
+      root = node;
+      break;
+    }
+    if (out.length < contextMax) out.push(node);
     pid = node.parent;
   }
 
-  return out.reverse();
+  out.reverse();
+  return root ? [root, ...out] : out;
 }
 
 // ---- 一轮 ----------------------------------------------------------------

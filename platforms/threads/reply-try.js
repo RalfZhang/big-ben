@@ -9,6 +9,10 @@
  *                                 └ 对方        └ 你（大笨钟）        └ 对方这次说的
  *
  * 每句话记得各自带引号，否则会被 shell 拆成好几句。
+ *
+ * 要带上原帖就设 REPLY_POST（线上原帖不占 contextMessages 的名额，这里也一样）：
+ *
+ *   REPLY_POST="咣！咣！咣！现在是 15 点整" npm run threads:reply:try -- "准吗"
  */
 import { compose, contextMax } from './reply.js';
 
@@ -28,13 +32,16 @@ const prior = said.slice(0, -1).map((t, i) => ({
 }));
 // 线上只回溯 contextMax 条，这里也截一样多，不然干跑出来的不是真实效果。
 // contextMax 为 0 要单独挡：slice(-0) 是 slice(0)，会把整份原样返回
-const context = contextMax ? prior.slice(-contextMax) : [];
+const post = String(process.env.REPLY_POST || '').trim();
+const context = contextMax
+  ? [...(post ? [{ text: post, mine: true, root: true }] : []), ...prior.slice(-contextMax)]
+  : [];
 
 try {
   const { text: out, via, skip } = await compose({ id: 'dry-run', username: '路人甲', text, context });
 
   console.log('');
-  for (const c of context) console.log(`${c.mine ? '大笨钟' : '对方　'}：${c.text}`);
+  for (const c of context) console.log(`${c.root ? '原帖　' : c.mine ? '大笨钟' : '对方　'}：${c.text}`);
   console.log(`对方　：${text}`);
   console.log(skip ? `大笨钟（${via}）：——（不回）\n` : `大笨钟（${via}）：${out}\n`);
 } catch (err) {
