@@ -235,12 +235,94 @@ m.cmx.im 是**审核制注册**，且实例规则第 48 条明确要求：
 
 ## 更新
 
+**push 到 master 就自动部署**（`.github/workflows/deploy.yml`）：GitHub Actions ssh 上 VPS，
+`git pull --ff-only` 之后跑 `deploy.sh` —— 构建、避开整点重启、再盯 20 秒确认新容器没在崩溃重启。
+结果在仓库的 Actions 页看，失败了 GitHub 会发邮件。只改了 `*.md` 的推送不触发；想手动重跑一次就
+`gh workflow run deploy`。
+
+手动部署（还没配自动部署，或者 Actions 那边出了问题）：
+
 ```bash
-git pull
-docker compose up -d --build   # 代码变了，重新构建
+git pull && ./deploy.sh
 # 或
 docker compose restart         # 只改了 config.js，无需重建
 ```
+
+`deploy.sh` 赶上整点前后（:58 ~ :03）会先干等到 03 分再重启：旧容器停下要十来秒，新的起来还得先登一遍
+各平台才挂上定时任务，压在 :00 上那一轮报时就丢了，不会补发。所以部署偶尔「卡」几分钟是正常的。
+
+**注意：自动部署跑的是普通的 `docker compose up -d`，命令行上临时带的 `LOG_LEVEL`、`REPLY_DRY_RUN`
+下次推送就会被复位** —— 正在干跑调提示词的时候推一次代码，评论区就切回真实发送了。想让它们跨部署保持，
+写进 VPS 项目目录下的 `.env`（比如 `REPLY_DRY_RUN=1`；compose 会自动读，它是未跟踪文件，不影响
+`git pull`），用完删掉。`POST_ON_STARTUP` 别往里写，不然每次部署都发一条。
+
+### 首次配置自动部署
+
+前提：VPS 的 SSH 端口对公网开放（GitHub 的机器要连得进来），项目已经按「首次部署」跑起来了。
+
+下面全在 Mac 的终端里、项目目录下做，**同一个窗口里**按顺序来（变量只活在当前这个 shell 里）。
+命令块里都没写注释，因为 zsh 默认不认交互输入里的 `#`。
+
+先设四个变量：`VPS` 是 VPS 地址；`VPS_USER` 是平时上去跑 `docker compose` 的用户，得是 root
+或在 docker 组里（这条路走不了 sudo）；`VPS_PORT` 是 SSH 端口；`VPS_DIR` 是 VPS 上项目目录的绝对路径
+（上去 `cd` 进项目跑 `pwd` 抄下来；别写成 `~/...`，`~` 会在 Mac 这边就被展开）。
+平时用 `ssh 别名` 登录的，`ssh -G 别名 | grep -E '^(hostname|user|port) '` 能看到前三个的实际值。
+
+```bash
+VPS=1.2.3.4 VPS_USER=root VPS_PORT=22 VPS_DIR=/path/to/big-ben
+```
+
+预检：登得上、目录对、不靠 Mac 转发的 agent 也能 `git fetch`、不用 sudo 就能跑 docker ——
+这几样自动部署时都得成立：
+
+```bash
+ssh -p "$VPS_PORT" "$VPS_USER@$VPS" "cd $VPS_DIR && git remote get-url origin && SSH_AUTH_SOCK= git fetch --dry-run && git status --short && docker ps --format '{{.Names}} {{.Status}}'"
+```
+
+正常是第一行仓库地址、最后一行 `big-ben Up ...`。中途报错，或者中间列出了 ` M compose.yaml`
+这类改动过的文件，都先按下面「自动部署失败」那张表处理掉。
+
+没问题就整段粘进去：
+
+```bash
+D=$(mktemp -d) && ssh-keygen -q -t ed25519 -N '' -C big-ben-deploy -f "$D/key"
+printf '%s\n' "restrict,command=\"cd $VPS_DIR && git pull --ff-only && ./deploy.sh\" $(cat "$D/key.pub")" \
+  | ssh -p "$VPS_PORT" "$VPS_USER@$VPS" 'mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
+gh secret set DEPLOY_SSH_KEY < "$D/key"
+gh secret set DEPLOY_HOST --body "$VPS"
+gh secret set DEPLOY_USER --body "$VPS_USER"
+gh secret set DEPLOY_PORT --body "$VPS_PORT"
+ssh-keyscan -p "$VPS_PORT" "$VPS" | gh secret set DEPLOY_KNOWN_HOSTS
+rm "$D/key" "$D/key.pub" && rmdir "$D"
+```
+
+它做了三件事：
+
+- 生成一把专用的部署 key，公钥加进 VPS 的 `authorized_keys`，**用 `command=` 锁死**：
+  拿这把 key 登上来只能跑「`git pull` + `./deploy.sh`」，开不了 shell，也做不了端口转发。
+  `git pull` 放在这儿而不是 `deploy.sh` 里，是为了每次跑的都是刚拉下来的那版 `deploy.sh`，
+  哪次把它改坏了，下一次推送的修复也照样拉得下来
+- 私钥和地址、用户、端口存进仓库的 Actions secrets，本地那份随即删掉。地址这些算不上机密也放 secrets，
+  是因为仓库是公开的，Actions 日志谁都能看，secrets 会被打码
+- 在自己电脑上扫一次 VPS 的主机公钥存起来，Actions 每次连都拿它核对，防中间人
+  （不少教程是在 Actions 里每次现扫，等于从不核对）
+
+配完 `gh secret list` 应该能看到 5 个 `DEPLOY_*`。然后 `gh workflow run deploy` 触发一次
+（或者直接推一次），`gh run watch` 看它跑完。
+
+不想要了：删掉 VPS `authorized_keys` 里结尾是 `big-ben-deploy` 的那行，GitHub 里存的 key 当场作废。
+
+### 自动部署失败
+
+| 日志里 | 原因 |
+| --- | --- |
+| `Permission denied (publickey)` | `authorized_keys` 那行没加对，或者 `DEPLOY_USER` 不是加 key 的那个用户 |
+| `Host key verification failed` | VPS 重装过、主机公钥变了。重跑上面 `ssh-keyscan` 那行 |
+| `Connection timed out` | GitHub 的机器连不进来：防火墙只放行了自己的 IP，或者被 fail2ban 封了 |
+| `would be overwritten by merge` | VPS 上改过被跟踪的文件（比如照下面「常见故障」往 `compose.yaml` 里加了 DNS / 代理），这次推送又动了它。**故意不自动覆盖**，代理配置一丢就全挂。一劳永逸的办法：把这些 VPS 专属的配置挪进同目录的 `compose.override.yaml`（compose 自动合并它，git 不管它），再 `git checkout -- compose.yaml` 还原 |
+| `Not possible to fast-forward` | 历史对不上：force-push 过，或者 VPS 上有本地提交。上去看 `git log` 手动处理 |
+| `git@github.com: Permission denied` | VPS 上平时 `git pull` 靠的是从 Mac 转发过去的 ssh agent，自动部署时没有。仓库是公开的，`git remote set-url origin https://github.com/RalfZhang/douban-guang` 就不用认证了 |
+| `容器没跑稳` | 新代码一启动就崩。上 VPS 看 `docker compose logs big-ben`，修完再推 |
 
 ## 修完之后确认发布链路
 
