@@ -19,12 +19,14 @@ export default {
     password: ''      // 豆瓣密码
   },
 
+  // 顶层是中文主账号（脆脆大笨钟）。其他语言的账号写在最下面的 accounts 里，共用同一个 Meta app
   threads: {
     enabled: true,
     appId: '',        // Meta 后台 Use cases → Customize → Settings 里的 Threads app ID
     appSecret: '',    // 同一页的 Threads app secret（续期要用）
     accessToken: '',  // 同一页最下方 User Token Generator → Generate Access Token
     userId: '',       // 可留空，留空就用 /me
+    username: '',     // 可留空。填了就在启动时核对 token 是不是这个号的，不是就不发（防授权时登错号）
     // 只有跑 npm run threads:auth 才需要，值和后台 Redirect Callback URLs 里填的要逐字一致
     redirectUri: '',
 
@@ -56,13 +58,26 @@ export default {
     // 两个自动回复功能共用 Threads 的「1000 条回复/24h」池子，这里预扣掉留给手动操作。
     // 实际闸门是「服务端真实用量 vs 1000 - 这个数」（platforms/threads/quota.js）。
     // 整点敲钟不花这个池子 —— 发帖是另一档 250 条/24h
-    replyQuotaHeadroom: 100
+    replyQuotaHeadroom: 100,
+
+    // 其他语言的账号。key 就是语言（en / es / fr，文案见 lib/locales/），也是平台名后缀：
+    // en → threads-en，token 存在 data/threads-en-token.json，POST_ON_STARTUP=threads-en 只让它发。
+    // appId / appSecret / redirectUri 只在上面填一份，各账号共用；mentions / reply 只有主账号有。
+    // 每个号都要先在 Meta 后台加成 Threads Tester，再拿自己的 token，见 deploy.md「多语言账号」
+    accounts: {
+      en: { enabled: false, accessToken: '', username: '' },   // 伦敦时间，BONG
+      es: { enabled: false, accessToken: '', username: '' },   // 墨西哥城时间，¡Dong!
+      fr: { enabled: false, accessToken: '', username: '' }    // 巴黎时间，Dong !
+    }
   },
 
   mastodon: {
     enabled: true,
     instance: 'https://m.cmx.im',
-    accessToken: ''   // 偏好设置 → 开发 → 新建应用，scope 勾 write:statuses
+    accessToken: '',  // 偏好设置 → 开发 → 新建应用，scope 勾 write:statuses
+    // 其他语言的账号，规则同 threads.accounts（mastodon-en 之类），实例各填各的：
+    //   en: { enabled: true, instance: 'https://...', accessToken: '' }
+    accounts: {}
   },
 
   // 给「评论区自动回复」现编回复用的模型，只有 threads.reply.enabled 时才会被调用。

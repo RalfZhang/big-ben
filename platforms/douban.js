@@ -3,6 +3,7 @@
 import crypto from 'node:crypto';
 
 import config from '../config.js';
+import { getLocale } from '../lib/locales/index.js';
 import { log, describeError } from '../lib/log.js';
 
 const cfg = config.douban || {};
@@ -160,6 +161,7 @@ async function post(text, ctx, retried = false) {
 
 export default {
   name: 'douban',
+  locale: getLocale('zh'),
   brand: '豆瓣',
   enabled: Boolean(cfg.enabled),
   async init() {

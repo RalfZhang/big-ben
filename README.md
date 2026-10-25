@@ -13,6 +13,15 @@
 咣！×N 豆瓣大笨钟提醒您：北京时间 N 点整，2026年已悄悄溜走67.867%。
 ```
 
+Threads 上还可以另开英 / 西 / 法账号，各按当地习惯报时（伦敦 / 墨西哥城 / 巴黎时间），
+见 [deploy.md](deploy.md) 的「Threads 多语言账号」：
+
+```
+BONG BONG BONG — Big Ben here: it's 3 PM in London. 81.234% of 2026 has slipped away.
+¡Dong! ¡Dong! ¡Dong! Big Ben les avisa: son las 3 de la tarde en Ciudad de México. Ya se fue el 81.234% de 2026.
+Dong ! Dong ! Dong ! Ici Big Ben : il est 15 h à Paris. Déjà 81,234 % de l'année 2026 derrière nous.
+```
+
 Threads 上还会自动接话（可选，默认关）：问时间的回一句精确到秒的报时，
 其他内容交给 Gemini 现编一句。见 [deploy.md](deploy.md) 的「评论区自动回复」。
 

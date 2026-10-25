@@ -5,14 +5,18 @@
  *
  * 前置：Meta 后台把 DEFAULT_SCOPES 逐个 Add，Redirect Callback URLs 填的
  * 那个 URL 原样抄进 config.threads.redirectUri（逐字一致）。详见 deploy.md。
- * 跑完直接写好 data/threads-token.json，之后进程每天 04:00 自己续期。
+ * 跑完直接写好该账号的 token 文件，之后进程每天 04:00 自己续期。
+ *
+ *   npm run threads:auth                  中文主账号 → data/threads-token.json
+ *   npm run threads:auth -- en            config.threads.accounts.en → data/threads-en-token.json
+ *   npm run threads:auth -- en --scopes=threads_basic,threads_content_publish
+ *
+ * 授权给的是浏览器里当前登着的那个 Threads 账号，所以多账号时用无痕窗口登对应的号。
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import readline from 'node:readline/promises';
 
 import config from '../../config.js';
-import { TOKEN_FILE } from './index.js';
+import { accounts, handle } from './index.js';
 
 const cfg = config.threads || {};
 
@@ -55,7 +59,21 @@ function extractCode(input) {
   }
 }
 
-const scopes = (process.argv[2] || DEFAULT_SCOPES.join(',')).split(',').map((s) => s.trim()).filter(Boolean);
+const args = process.argv.slice(2);
+const scopeArg = args.find((a) => a.startsWith('--scopes='));
+const scopes = (scopeArg ? scopeArg.slice('--scopes='.length) : DEFAULT_SCOPES.join(','))
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+// 认 en 也认 threads-en；不给就是中文主账号（它的 key 是空串）
+const arg = args.find((a) => !a.startsWith('--')) || '';
+const account = accounts.find((a) => a.key === arg.replace(/^threads-?/, ''));
+if (!account) {
+  die(`config 里没有「${arg}」这个 Threads 账号。可选：`
+    + `${accounts.map((a) => a.key || '（不填）').join(' / ')}\n`
+    + '  新账号先在 config.threads.accounts 里加上，比如 accounts: { en: { enabled: true } }');
+}
+const TOKEN_FILE = account.tokenFile;
+const expected = account.username;
 
 if (!cfg.appId) die('config.threads.appId 是空的');
 if (!cfg.appSecret) die('config.threads.appSecret 是空的（兑换长效 token 要用）');
@@ -71,9 +89,11 @@ authUrl.searchParams.set('redirect_uri', cfg.redirectUri);
 authUrl.searchParams.set('response_type', 'code');
 authUrl.searchParams.set('scope', scopes.join(','));
 
+console.log(`\n要授权的账号：${account.name}${expected ? `（@${expected}）` : ''}`);
 console.log('\n要申请的权限：');
 for (const s of scopes) console.log(`  - ${s}`);
-console.log('\n用 bot 账号登录 Threads，然后打开这个链接授权：\n');
+console.log(`\n用 ${expected ? `@${expected}` : `${account.name} 对应的`} 这个 Threads 账号登录（浏览器里登着别的号就开无痕窗口），`
+  + '然后打开这个链接授权：\n');
 console.log(authUrl.toString());
 console.log('\n授权后浏览器会跳到 %s（打不开是正常的），', cfg.redirectUri);
 console.log('把地址栏里那条完整 URL 复制粘贴到这里：\n');
@@ -125,14 +145,25 @@ if (missing.length) {
   console.log('\n这些多半是没在 Use cases → Customize → Permissions and features 里 Add。');
 }
 
-fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
-fs.writeFileSync(TOKEN_FILE, `${JSON.stringify({
-  accessToken: long.access_token,
-  expiresAt: Date.now() + expiresIn * 1000,
-  // 不满 24 小时的 token Meta 不让续，记成现在让每天那次续期自己跳过
-  refreshedAt: Date.now(),
-}, null, 2)}\n`);
+// 写文件之前先看看 token 到底是谁的：浏览器里登错了号，英文报时就会发到中文账号上
+const me = await call('/me', `${GRAPH}/v1.0/me?fields=id,username`
+  + `&access_token=${encodeURIComponent(long.access_token)}`);
+if (expected && handle(me.username) !== expected) {
+  die(`这个 token 属于 @${me.username}，不是 config 里给 ${account.name} 写的 @${expected}。没有写入。\n`
+    + '  浏览器里登对账号（或开无痕窗口）再跑一次。');
+}
+console.log(`\n✓ 这个 token 属于 @${me.username}`);
+if (!expected) {
+  console.log(`  确认这就是 ${account.name} 该用的号。`
+    + `建议把 username: '${me.username}' 填进 config 里这个账号，以后登错号进程会直接拒绝启动。`);
+  const confirm = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ok = (await confirm.question(`写入 ${TOKEN_FILE}？(y/N) `)).trim().toLowerCase();
+  confirm.close();
+  if (ok !== 'y' && ok !== 'yes') die('没有写入。');
+}
+
+account.saveToken(long.access_token, expiresIn);
 
 console.log(`\n✓ 已写入 ${TOKEN_FILE}`);
-console.log('\n注意：config.threads.accessToken 里那份是旧的，但以 data/ 里这份为准，不用改。');
+console.log('\n注意：config 里这个账号的 accessToken 那份是旧的，但以 data/ 里这份为准，不用改。');
 console.log('接下来：docker compose up -d\n');

@@ -7,7 +7,7 @@
  */
 import config from '../../config.js';
 import { log, describeError } from '../../lib/log.js';
-import { graph, owner } from './index.js';
+import { main as threads } from './index.js';
 
 const cfg = config.threads || {};
 
@@ -31,7 +31,7 @@ export async function replyBudgetLeft() {
   }
 
   try {
-    const body = await graph(`/${owner}/threads_publishing_limit`, {
+    const body = await threads.graph(`/${threads.owner}/threads_publishing_limit`, {
       form: { fields: 'reply_quota_usage,reply_config' },
     });
     // 这个 edge 返回 { data: [ {...} ] }，但真给成裸对象也接着

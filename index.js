@@ -7,12 +7,13 @@ import ns from 'node-schedule';
 import { log, describeError } from './lib/log.js';
 import { beat } from './lib/heartbeat.js';
 import { sleep, isRetryable } from './lib/retry.js';
-import { getText, idempotencyKey, now } from './lib/text.js';
+import { idempotencyKey, now } from './lib/text.js';
 import douban from './platforms/douban.js';
-import threads from './platforms/threads/index.js';
-import mastodon from './platforms/mastodon.js';
+import { accounts as threadsAccounts } from './platforms/threads/index.js';
+import { accounts as mastodonAccounts } from './platforms/mastodon.js';
 
-const platforms = [douban, threads, mastodon].filter((p) => p.enabled);
+// Threads / 长毛象每种语言一个账号，各自是一个平台（threads、threads-en、mastodon……）
+const platforms = [douban, ...threadsAccounts, ...mastodonAccounts].filter((p) => p.enabled);
 
 const once = process.argv.includes('--once');
 
@@ -66,7 +67,7 @@ async function deliver(p, text, ctx) {
   throw lastErr;
 }
 
-// 各平台共用同一个 at，保证报的进度百分比逐字一致
+// 各平台共用同一个 at：同一种语言报的进度百分比逐字一致，长毛象的 idempotencyKey 也只算一次
 async function postRound(makeText, { at = now(), targets = platforms, kind = 'hourly' } = {}) {
   const ctx = { at, kind, idempotencyKey: idempotencyKey(kind, at) };
   const results = await Promise.allSettled(
@@ -80,7 +81,7 @@ async function postRound(makeText, { at = now(), targets = platforms, kind = 'ho
 async function postHourly() {
   const at = now();
   log.info(`posting for ${at.format('YYYY-MM-DD HH:00')}`);
-  await postRound((p, t) => getText(p.brand, t), { at });
+  await postRound((p, t) => p.locale.hourly(p.brand, t), { at });
 }
 
 // 进程级异常也要留下日志，方便容器重启后回溯
@@ -114,14 +115,14 @@ await Promise.allSettled(platforms.map(async (p) => {
 }));
 
 if (once) {
-  const ok = await postRound((p, t) => getText(p.brand, t));
+  const ok = await postRound((p, t) => p.locale.hourly(p.brand, t));
   process.exit(ok === platforms.length ? 0 : 1);
 }
 
 const startup = startupTargets();
 if (startup.length) {
   log.info(`startup notice -> ${startup.map((p) => p.name).join(', ')}`);
-  await postRound(() => '尝试启动中……', { targets: startup, kind: 'boot' });
+  await postRound((p) => p.locale.booting, { targets: startup, kind: 'boot' });
 } else {
   log.info('startup notice skipped (POST_ON_STARTUP=douban 可让指定平台发一条确认发布链路)');
 }
@@ -134,11 +135,15 @@ ns.scheduleJob('30 */10 * * * *', () => {
   beat();
 });
 
-// Threads 长效 token 每天续一次（内部有「满 24 小时才续」的判断）
-if (threads.enabled) {
+// 带 maybeRefresh 的平台（Threads 各账号）长效 token 每天续一次（内部有「满 24 小时才续」的判断），
+// 各账号互不连累
+const refreshable = platforms.filter((p) => p.maybeRefresh);
+if (refreshable.length) {
   ns.scheduleJob('0 4 * * *', async () => {
-    try { await threads.maybeRefresh(); }
-    catch (err) { log.error(`threads token refresh failed: ${describeError(err)}`); }
+    for (const p of refreshable) {
+      try { await p.maybeRefresh(); }
+      catch (err) { log.error(`${p.name} token refresh failed: ${describeError(err)}`); }
+    }
   });
 }
 

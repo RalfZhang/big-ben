@@ -15,8 +15,9 @@ import path from 'node:path';
 
 import config from '../../config.js';
 import { log, describeError } from '../../lib/log.js';
-import { clockText, now } from '../../lib/text.js';
-import threads, { graph, owner, publish, tokenScopes, whoami } from './index.js';
+import { now } from '../../lib/text.js';
+// 只挂在中文主账号上。要给其他语言的账号也开，得把这个 watcher 改成按账号起
+import { main as threads } from './index.js';
 import { replyBudgetLeft, spendReplyBudget } from './quota.js';
 import { hasReplied, markReplied } from './replied.js';
 
@@ -122,12 +123,12 @@ async function poll() {
   // 第一次跑没有 state 就从「刚才」开始 —— 几小时前的 at 现在回个当前时间没意义
   const since = Math.max(EPOCH_SEC, state.since || (nowSec - OVERLAP_SEC));
 
-  const body = await graph(`/${owner}/mentions`, {
+  const body = await threads.graph(`/${threads.owner}/mentions`, {
     form: { fields: FIELDS, since: String(since) },
   });
   const items = Array.isArray(body.data) ? body.data : [];
 
-  const self = await whoami();
+  const self = await threads.whoami();
   const seen = new Set(state.seen);
   const batchIds = new Set(items.map((m) => m.id));
 
@@ -155,9 +156,9 @@ async function poll() {
     }
 
     try {
-      const id = await publish({
+      const id = await threads.publish({
         media_type: 'TEXT',
-        text: clockText(threads.brand),
+        text: threads.locale.clock(threads.brand),
         reply_to_id: m.id,
       });
       log.info(`mentions: replied to @${m.username} ${m.permalink || m.id} (id=${id ?? '-'})`);
@@ -198,7 +199,7 @@ let preflighted = false;
 async function preflight() {
   if (preflighted) return true;
 
-  const scopes = await tokenScopes();
+  const scopes = await threads.tokenScopes();
   if (!scopes.includes(REQUIRED_SCOPE)) {
     log.error(`mentions watcher 停了：token 里没有 ${REQUIRED_SCOPE}，/mentions 调不动。`);
     log.error(`  这个 token 现有权限：${scopes.join(', ') || '（一个都没查到）'}`);

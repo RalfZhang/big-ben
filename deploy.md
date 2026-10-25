@@ -12,7 +12,7 @@ docker compose up -d --build
 
 `config.js` 只读挂载进容器，不进镜像也不进 git。
 
-`data/` 是可写卷，放 Threads 的长效 token（`data/threads-token.json`）—— 这个文件丢了要重新人工授权，别跟着代码一起清；以及几个自动回复的处理进度（`threads-mentions.json`、`threads-replies.json`、`threads-replied.json`），这几个丢了无所谓，最坏是重复回几条。
+`data/` 是可写卷，放 Threads 的长效 token（中文主账号 `data/threads-token.json`，其他语言 `data/threads-en-token.json` 之类）—— 这些文件丢了要重新人工授权，别跟着代码一起清；以及几个自动回复的处理进度（`threads-mentions.json`、`threads-replies.json`、`threads-replied.json`），这几个丢了无所谓，最坏是重复回几条。
 
 ## 账号准备
 
@@ -42,11 +42,44 @@ apikey/secret 从 Frodo APK 里提取，账号密码是普通豆瓣账号。字�
 
 首次启动会把 `threads.accessToken` 播种进 `data/threads-token.json`，**之后以这个文件为准**（config 里那份会一直停留在最初那次）。限额 250 帖/24h，我们 24 帖/天。进程每天 04:00 自动续期，每次重置 60 天，所以**离线不超过 59 天都能自己救回来**。
 
+### Threads 多语言账号（英 / 西 / 法，可选）
+
+`config.threads` 顶层是中文主账号；英 / 西 / 法各是一个独立的 Threads 账号，写在 `config.threads.accounts` 里，
+共用上面那个 Meta app（`appId` / `appSecret` / `redirectUri` 只在顶层填一份）。各语言的时区和文案在 `lib/locales/`：
+
+| key | 平台名 | 时区 | 样例 |
+| --- | --- | --- | --- |
+| `en` | `threads-en` | 伦敦 | BONG BONG BONG — Big Ben here: it's 3 PM in London. 81.234% of 2026 has slipped away. |
+| `es` | `threads-es` | 墨西哥城 | ¡Dong! ¡Dong! ¡Dong! Big Ben les avisa: son las 3 de la tarde en Ciudad de México. Ya se fue el 81.234% de 2026. |
+| `fr` | `threads-fr` | 巴黎 | Dong ! Dong ! Dong ! Ici Big Ben : il est 15 h à Paris. Déjà 81,234 % de l'année 2026 derrière nous. |
+
+伦敦 / 巴黎拨钟（夏令时开始 / 结束）后的第一条报时，末尾会多一句提醒大家调表；墨西哥城和北京没有夏令时。
+
+每加一个号：
+
+1. 注册 Threads 账号，**profile 设为 public**
+2. Meta 后台 App roles 里把它也加成 **Threads Tester**，并在这个号的 Threads App 里接受邀请
+3. `config.threads.accounts.en` 写上 `{ enabled: true, username: '<这个号的 handle>' }`
+4. 本机跑授权，直接写好 `data/threads-en-token.json`：
+
+   ```bash
+   npm run threads:auth -- en
+   ```
+
+   **授权给的是浏览器里当前登着的那个 Threads 账号**，所以开无痕窗口、登这个号再打开链接。
+   （也可以像主账号那样用 Token Generator 拿 token 填进 `accounts.en.accessToken`，同样注意登对号。）
+5. `POST_ON_STARTUP=threads-en docker compose up -d`，确认发到了对的号
+
+`username` 建议填：填了之后启动时会核对 token 是不是这个号的，不是就报 `threads-en init failed`、
+一条都不发 —— 防的是授权时登错号，英文报时发到中文账号上。`threads:auth` 写文件前也会核对一遍。
+
+自动回复（下面两节）目前只挂在中文主账号上。要给其他语言开，得把 watcher 改成按账号起，再按语言写 persona。
+
 ### Threads 被 at 自动回复（可选）
 
 别人在 Threads 上 at 你时自动回一条当前时间。整份实现在 `platforms/threads/mentions.js`，
 不要了就删掉那个文件，再删掉根目录 `index.js` 末尾那段带「被 at 自动回复」注释的 import 和调用，
-别处不用动（同目录 `index.js` 为它开的三个 export 是 `post()` 自己也在用的，留着不是死代码）。
+别处不用动。
 
 **先看这条，能省掉半天：后台 Settings 里那个 `Generate Access Token` 按钮拿不到这个权限。**
 它发的 scope 是写死的一套 —— Threads API 首发时的五个（`threads_basic`、
@@ -89,7 +122,7 @@ apikey/secret 从 Frodo APK 里提取，账号密码是普通豆瓣账号。字�
    npm run threads:auth
    ```
 
-   它会打印一个授权链接 → 用 bot 账号登录 Threads 并同意 → 浏览器跳到你填的 redirect URL
+   它会打印一个授权链接 → 用中文主账号登录 Threads 并同意 → 浏览器跳到你填的 redirect URL
    （那页打不开是正常的）→ 把地址栏整条 URL 复制粘回终端。脚本会自动兑换成 60 天长效 token，
    当场打印实际拿到的权限，并写进 `data/threads-token.json`
 
@@ -233,6 +266,10 @@ m.cmx.im 是**审核制注册**，且实例规则第 48 条明确要求：
 
 这个 token 不过期，不需要续期流程。实例规则第 35 条「机器人账户不得滥用服务器资源」—— 24 帖/天没问题。
 
+其他语言的长毛象账号写在 `config.mastodon.accounts` 里（`en: { enabled: true, instance, accessToken }`），
+平台名是 `mastodon-en` 之类，发嘟的 `language` 跟着语言走。m.cmx.im 是中文实例，其他语言要另找
+**明确允许机器人账户**的实例（专门放 bot 的 botsin.space 已在 2024 年底关站），注册前先读实例规则。
+
 ## 更新
 
 **push 到 master 就自动部署**（`.github/workflows/deploy.yml`）：GitHub Actions ssh 上 VPS，
@@ -326,16 +363,18 @@ rm "$D/key" "$D/key.pub" && rmdir "$D"
 
 ## 修完之后确认发布链路
 
-某个平台出问题、你改完重启后，想确认「现在真的发得出去了」，就临时指定那个平台发一条「尝试启动中……」：
+某个平台出问题、你改完重启后，想确认「现在真的发得出去了」，就临时指定那个平台发一条「尝试启动中……」（其他语言的账号发对应的译文）：
 
 ```bash
 POST_ON_STARTUP=douban docker compose up -d
 ```
 
-只有 douban 会发，另外两个平台不受打扰。可以填逗号分隔的多个平台名，或 `all` 全发：
+只有 douban 会发，其他平台不受打扰。可以填逗号分隔的多个平台名，或 `all` 全发。
+多语言账号各是一个平台（`threads-en`、`mastodon-en` 之类），启动日志的 `platforms:` 那行有全部名字：
 
 ```bash
 POST_ON_STARTUP=douban,mastodon docker compose up -d
+POST_ON_STARTUP=threads-en,threads-fr docker compose up -d
 POST_ON_STARTUP=all docker compose up -d
 ```
 
@@ -544,4 +583,4 @@ unset TOKEN
 
 ### 时间不对
 
-业务时间强制 `Asia/Shanghai`，与服务器时区无关；日志时间也是北京时间。若日志时间异常，检查镜像内 tzdata（Dockerfile 已安装）。
+中文版报时强制 `Asia/Shanghai`，其他语言按 `lib/locales/` 里各自的 `tz`，都与服务器时区无关；日志时间一律是北京时间。若日志时间异常，检查镜像内 tzdata（Dockerfile 已安装）。

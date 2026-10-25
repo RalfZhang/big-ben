@@ -20,9 +20,11 @@ import path from 'node:path';
 
 import config from '../../config.js';
 import { log, describeError } from '../../lib/log.js';
-import { clockText, now } from '../../lib/text.js';
+import { now } from '../../lib/text.js';
 import { ask, aiProviders } from '../../services/ai.js';
-import threads, { errorCode, graph, owner, publish, tokenScopes, whoami } from './index.js';
+// 只挂在中文主账号上（提示词、正则都是按中文写的）。要给其他语言的账号也开，
+// 得把这个 watcher 改成按账号起，再按语言写一套 persona
+import { errorCode, main as threads } from './index.js';
 import { replyBudgetLeft, spendReplyBudget } from './quota.js';
 import { hasReplied, markReplied } from './replied.js';
 
@@ -288,7 +290,7 @@ export function selfOuting(text) {
 // via 给日志用，方便回头看哪条是 AI 编的。导出给 ./reply-try.js 干跑用
 export async function compose(m, at = now()) {
   if (looksLikeTimeQuestion(m.text)) {
-    return { text: clockText(threads.brand, at), via: '问时间/本地判' };
+    return { text: threads.locale.clock(threads.brand, at), via: '问时间/本地判' };
   }
 
   // root 是帖子本身，不算一轮对话 —— 顶层评论爬上去就是它，认成 engaged 的话
@@ -303,7 +305,7 @@ export async function compose(m, at = now()) {
 
   // 暗号可能被包在引号或空格里，别用全等判
   if (/__\s*TIME\s*__/i.test(raw)) {
-    return { text: clockText(threads.brand, at), via: `问时间/${provider}判` };
+    return { text: threads.locale.clock(threads.brand, at), via: `问时间/${provider}判` };
   }
   if (/__\s*SKIP\s*__/i.test(raw)) {
     return { skip: true, via: `不值得回/${provider}判` };
@@ -327,7 +329,7 @@ let postFields = 'id,timestamp,has_replies,text';
 
 async function recentPosts(sinceSec) {
   try {
-    const body = await graph(`/${owner}/threads`, {
+    const body = await threads.graph(`/${threads.owner}/threads`, {
       form: { fields: postFields, since: String(sinceSec), limit: String(MAX_POSTS) },
     });
     return Array.isArray(body?.data) ? body.data : [];
@@ -344,7 +346,7 @@ async function recentPosts(sinceSec) {
 
 async function conversationOf(postId) {
   // reverse=false 拿正序，日志跟时间线一致
-  const body = await graph(`/${postId}/conversation`, {
+  const body = await threads.graph(`/${postId}/conversation`, {
     form: { fields: FIELDS_CONV, reverse: 'false' },
   });
   return Array.isArray(body?.data) ? body.data : [];
@@ -410,7 +412,7 @@ async function poll() {
     state.dayCount = 0;
   }
 
-  const self = await whoami();
+  const self = await threads.whoami();
   const posts = await recentPosts(Math.max(EPOCH_SEC, nowSec - lookbackHours * 3600));
   const worth = postFields.includes('has_replies') ? posts.filter((p) => p.has_replies) : posts;
 
@@ -501,7 +503,7 @@ async function poll() {
         continue;
       }
 
-      const id = await publish({ media_type: 'TEXT', text, reply_to_id: m.id });
+      const id = await threads.publish({ media_type: 'TEXT', text, reply_to_id: m.id });
 
       log.info(`reply: 回了 @${m.username} [${via}] ${m.permalink || m.id} (id=${id ?? '-'}) <- ${text}`);
       seen.add(m.id);
@@ -551,7 +553,7 @@ let preflighted = false;
 async function preflight() {
   if (preflighted) return true;
 
-  const scopes = await tokenScopes();
+  const scopes = await threads.tokenScopes();
   if (!scopes.includes(REQUIRED_SCOPE)) {
     log.error(`reply watcher 停了：token 里没有 ${REQUIRED_SCOPE}，/conversation 调不动。`);
     log.error(`  这个 token 现有权限：${scopes.join(', ') || '（一个都没查到）'}`);
