@@ -20,6 +20,9 @@ Chimes every hour on the hour and tells you how much of the year has slipped awa
 [FR] Dong ! Dong ! Dong ! Ici Big Ben : il est 15 h à Paris. Déjà 81,256 % de l'année 2026 derrière nous.
 ```
 
+## Deploy
+See [doc/deploy.md](doc/deploy.md).
+
 ## Credits
 - http://page.renren.com/renren_big_ben
 - https://github.com/DreaminginCodeZH/DoubanYearProgress

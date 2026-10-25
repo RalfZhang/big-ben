@@ -1,5 +1,5 @@
-// Docker HEALTHCHECK：心跳在 STALE_MS 内更新过则健康。
-// index.js 每 10 分钟写一次，超时即判定卡死，交给 restart 策略拉起。
+// Docker HEALTHCHECK: healthy if the heartbeat is newer than STALE_MS.
+// index.js writes it every 10 minutes.
 import fs from 'node:fs';
 
 const HEARTBEAT_FILE = process.env.HEARTBEAT_FILE || '/tmp/big-ben.heartbeat';

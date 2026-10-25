@@ -1,12 +1,13 @@
 /**
- * Threads：官方 Graph API，两步发布（先建 container，再 publish）。
+ * Threads: official Graph API. Posting has two steps: create a container, then publish it.
  *
- * 唯一有状态的平台：长效 token 60 天过期，必须落盘，否则重启就丢掉已续期的那份。
- * 初始 token 从 config 里的 accessToken 播种进 data/<账号名>-token.json，
- * 之后以文件为准，进程每天自己续期。拿 token 的几条路见 deploy.md。
+ * The only platform with state: long-lived tokens expire after 60 days, so they are saved to disk
+ * (or a restart would lose the refreshed one). The first token is seeded from config accessToken
+ * into data/<name>-token.json. After that the file wins and the process refreshes it daily.
+ * See doc/deploy.md for how to get tokens.
  *
- * 可以有多个账号（每种语言一个），共用同一个 Meta app。config.threads 顶层是中文主账号，
- * 名字叫 threads；config.threads.accounts.en 之类是其他语言，名字叫 threads-en。
+ * One account per language, all sharing one Meta app. Top-level config.threads is the main Chinese
+ * account, named threads; config.threads.accounts.en etc. are named threads-en.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,25 +22,25 @@ const REFRESH_URL = 'https://graph.threads.net/refresh_access_token';
 
 const DAY = 24 * 60 * 60 * 1000;
 
-// Meta 的错误码埋在 { error: { code } } 里，直接读 err.body.code 永远是 undefined
+// Meta puts the code in { error: { code } }, so err.body.code alone is always undefined
 export function errorCode(err) {
   return err?.body?.error?.code ?? err?.body?.code;
 }
 
-// username 比较用：不分大小写，config 里多写个 @ 也认
+// For comparing usernames: ignore case and a leading @
 export function handle(username) {
   return String(username || '').replace(/^@/, '').toLowerCase();
 }
 
-// key 是语言（en / es / fr），也是账号名后缀；中文主账号的 key 是空串，名字就叫 threads
+// key is the language (en / es / fr) and the name suffix; the main Chinese account has key '' and is named threads
 function createAccount(key, cfg) {
   const name = key ? `threads-${key}` : 'threads';
   const locale = getLocale(key || 'zh');
   const owner = cfg.userId || 'me';
-  // 填了的话 init() 和 threads:auth 都拿它核对 token 是不是这个号的
+  // If set, init() and threads:auth check that the token belongs to this account
   const username = handle(cfg.username);
 
-  // 主账号的文件名跟多账号之前一样，升级不用重新授权
+  // Main account: data/threads-token.json, same as before multi-account support
   const tokenFile = (!key && process.env.THREADS_TOKEN_FILE)
     || new URL(`../../data/${name}-token.json`, import.meta.url).pathname;
 
@@ -48,12 +49,12 @@ function createAccount(key, cfg) {
   function readToken() {
     const raw = fs.readFileSync(tokenFile, 'utf8');
     const t = JSON.parse(raw);
-    if (!t.accessToken) throw new Error(`${tokenFile} 里没有 accessToken`);
+    if (!t.accessToken) throw new Error(`${tokenFile} has no accessToken`);
     return t;
   }
 
-  // 播种、续期、threads:auth 拿到的都是长效 token，到期时间一律从现在起算。
-  // refreshedAt 记成现在而不是 0：不满 24 小时的 token 去续期会被 Meta 直接拒
+  // Seeded, refreshed and threads:auth tokens are all long-lived; expiry counts from now.
+  // refreshedAt is now, not 0: Meta rejects refreshing a token under 24 hours old
   function saveToken(accessToken, expiresInSec) {
     token = {
       accessToken,
@@ -64,14 +65,14 @@ function createAccount(key, cfg) {
     fs.writeFileSync(tokenFile, `${JSON.stringify(token, null, 2)}\n`);
   }
 
-  // 首次启动：文件还不存在，拿 config 里的 token 播种。之后以文件为准
+  // First start: no file yet, so seed from config. After that the file wins
   function seedToken() {
     if (!cfg.accessToken) {
-      throw new Error(`${name} 的 accessToken 是空的 —— 去 Meta 后台 `
-        + 'Use cases → Customize → Settings → User Token Generator 点 Generate Access Token，'
-        + '或者跑 npm run threads:auth');
+      throw new Error(`${name} accessToken is empty. In the Meta dashboard, click `
+        + 'Use cases → Customize → Settings → User Token Generator → Generate Access Token, '
+        + 'or run npm run threads:auth');
     }
-    // Token Generator 给的就是 60 天长效 token
+    // Token Generator gives a 60-day long-lived token
     saveToken(cfg.accessToken);
     log.info(`${name} token seeded from config into ${tokenFile}`);
   }
@@ -108,8 +109,8 @@ function createAccount(key, cfg) {
     return parsed;
   }
 
-  // 自己的 username，两个 watcher 靠它认出「这条是自己发的」（自己回自己是死循环）。
-  // init() 已经查过一次并缓存，这里通常不发请求
+  // Our own username. Both watchers use it to skip our own posts (replying to ourselves would loop).
+  // init() already cached it, so this rarely sends a request
   let selfName = null;
 
   async function whoami() {
@@ -119,17 +120,17 @@ function createAccount(key, cfg) {
     return selfName;
   }
 
-  // 过期是本地就能判定的死局，救法明确，值得单独报出来
+  // Expiry can be checked locally and has a clear fix, so report it on its own
   function assertNotExpired() {
     if (token.expiresAt && token.expiresAt <= Date.now()) {
-      throw new Error(`${name} token 已于 ${new Date(token.expiresAt).toISOString()} 过期。`
-        + `救法：跑过 npm run threads:auth 的话就再跑一次（它直接重写 token 文件）；`
-        + '否则去 Meta 后台重新 Generate Access Token，填进 config 里这个账号的 accessToken，'
-        + `再删掉 ${tokenFile} 让它重新播种。`);
+      throw new Error(`${name} token expired at ${new Date(token.expiresAt).toISOString()}. `
+        + 'Fix: if you used npm run threads:auth, run it again (it rewrites the token file). '
+        + 'Otherwise click Generate Access Token in the Meta dashboard, put the token in config as the '
+        + `accessToken of this account, and delete ${tokenFile} so it is seeded again.`);
     }
   }
 
-  // 满 24 小时才允许续期，每次续期重新计 60 天
+  // Refresh is allowed after 24 hours; each refresh resets the 60 days
   async function maybeRefresh() {
     if (!token) token = readToken();
     assertNotExpired();
@@ -147,9 +148,9 @@ function createAccount(key, cfg) {
     log.info(`${name} token refreshed, expires ${new Date(token.expiresAt).toISOString().slice(0, 10)}`);
   }
 
-  // container 不是建完就能发的：实测马上 publish 会吃 HTTP 400 code 24，要等几秒。
-  // code 24 无论出现在查状态还是 publish，都是「还没就绪」；别的错才是真查不到，
-  // 那就直接往下走，让 publish 自己去撞
+  // A new container isn't ready at once: publishing right away gets HTTP 400 code 24.
+  // code 24 means "not ready yet" on both the status query and publish. On any other
+  // query error, stop waiting and let publish find out
   async function waitReady(id, timeoutMs = 60000) {
     const deadline = Date.now() + timeoutMs;
     let delay = 500;
@@ -160,7 +161,7 @@ function createAccount(key, cfg) {
       try {
         st = await graph(`/${id}`, { form: { fields: 'status,error_message' } });
       } catch (err) {
-        // 头几秒 container 连查都查不到，GET 自己就吃 code 24，等同 IN_PROGRESS
+        // For the first seconds even the GET gets code 24; same as IN_PROGRESS
         if (errorCode(err) !== 24) {
           log.debug(`${name} container ${id} status query failed: ${describeError(err)}`);
           return;
@@ -170,7 +171,7 @@ function createAccount(key, cfg) {
 
       if (st) {
         if (st.status === 'FINISHED') return;
-        // 这两个状态自己好不了，重建也是同样的内容，直接抛出来
+        // These won't fix themselves, and a new container would have the same content
         if (st.status === 'ERROR' || st.status === 'EXPIRED') {
           const err = new Error(`threads container ${st.status}`);
           err.body = { error: { code: st.status, message: st.error_message || 'no error_message' } };
@@ -189,16 +190,16 @@ function createAccount(key, cfg) {
     }
   }
 
-  // 建 container → 等就绪 → publish。报时和两个自动回复走同一条路，
-  // 差别只在 form 里多不多一个 reply_to_id
+  // Create container → wait until ready → publish. Used for posts and both reply features;
+  // replies just add reply_to_id
   async function publish(form) {
     const container = await graph(`/${owner}/threads`, { method: 'POST', form });
     if (!container.id) throw container;
 
     await waitReady(container.id);
 
-    // 轮询之后一般一次就过，这个循环只兜底 code 24。别的错一律抛给 index.js 的统一重试，
-    // 免得两层各 3 次叠成 9 次请求
+    // After waiting this usually works first time; the loop only handles code 24. Other errors go
+    // to the retry in index.js, so two layers of 3 don't become 9 requests
     let lastErr;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -210,24 +211,24 @@ function createAccount(key, cfg) {
       } catch (err) {
         lastErr = err;
         if (errorCode(err) !== 24) break;
-        log.warn(`${name} publish attempt ${attempt}/3 failed (container 未就绪): ${describeError(err)}`);
+        log.warn(`${name} publish attempt ${attempt}/3 failed (container not ready): ${describeError(err)}`);
         if (attempt < 3) await sleep(2000 * attempt);
       }
     }
 
-    // 放弃之前问一下状态，失败原因通常写在 error_message 里。
-    // FINISHED 且没有 error_message 说明锅不在 container 上，不值得占着 WARN
+    // Before giving up, ask for the status: the reason is often in error_message.
+    // FINISHED without error_message means the container is fine, so only debug
     try {
       const st = await graph(`/${container.id}`, { form: { fields: 'status,error_message' } });
       const line = `${name} container ${container.id} status=${st.status} ${st.error_message || ''}`.trim();
       if (st.status === 'FINISHED' && !st.error_message) log.debug(line);
       else log.warn(line);
-    } catch { /* 诊断用，问不到就算了 */ }
+    } catch { /* diagnostics only */ }
     throw lastErr;
   }
 
-  // token 里少一个 scope 时，Threads 只回 HTTP 500 code 1 "An unknown error occurred"，
-  // 不告诉你缺哪个 —— 只能主动问 debug_token。两个 watcher 的启动自检用
+  // If the token lacks a scope, Threads only returns HTTP 500 code 1 "An unknown error occurred"
+  // without saying which. So ask debug_token. Used by both watchers' startup checks
   async function tokenScopes() {
     const body = await graph('/debug_token', {
       base: 'https://graph.threads.net',
@@ -240,7 +241,7 @@ function createAccount(key, cfg) {
     key,
     name,
     locale,
-    // 中文主账号跟账号名「脆脆大笨钟」一致，其他语言统一叫 locale.brand（Big Ben）
+    // The Chinese account is 脆脆大笨钟; other languages use locale.brand (Big Ben)
     brand: locale.brand || '脆脆',
     enabled: Boolean(cfg.enabled),
     username,
@@ -259,8 +260,8 @@ function createAccount(key, cfg) {
 
       assertNotExpired();
 
-      // 续期失败不代表这个 token 不能用（比如刚播种的还不满 24 小时），
-      // 说了算的是下面那次 /me
+      // A failed refresh doesn't mean the token is unusable (a fresh seed is under 24 hours old).
+      // The /me call below decides
       try {
         await maybeRefresh();
       } catch (err) {
@@ -270,11 +271,11 @@ function createAccount(key, cfg) {
       const me = await graph(`/${owner}`, { form: { fields: 'id,username' } });
       selfName = handle(me.username);
 
-      // 跑 threads:auth 时浏览器里登错了号，token 就是别的账号的 —— 英文报时会发到中文账号上。
-      // 填了 username 就当场拦下，ready 起不来，一条都不发
+      // If the browser had the wrong account during threads:auth, English posts would go to the
+      // Chinese account. With username set, stop here: ready stays false and nothing is posted
       if (username && username !== selfName) {
-        throw new Error(`${name} 的 token 属于 @${me.username}，不是 config 里写的 @${username}。`
-          + `多半是跑 threads:auth 时浏览器登错了号：登对账号重跑一次 npm run threads:auth${key ? ` -- ${key}` : ''}`);
+        throw new Error(`${name} token belongs to @${me.username}, not @${username} from config. `
+          + `Probably the wrong account was logged in during threads:auth. Log in to the right one and run npm run threads:auth${key ? ` -- ${key}` : ''} again`);
       }
 
       log.info(`${name} authenticated as @${me.username} (id=${me.id}), token expires `
@@ -289,11 +290,11 @@ function createAccount(key, cfg) {
 
 const root = config.threads || {};
 
-// 中文主账号。两个自动回复 watcher 只认它
+// Main Chinese account. Both reply watchers use only this one
 export const main = createAccount('', root);
 
-// accounts.en → threads-en。appId / appSecret / redirectUri 这些 app 级字段只在顶层填，
-// 用到它们的 authorize.js / quota.js 直接读 config.threads
+// accounts.en → threads-en. App fields (appId / appSecret / redirectUri) are only at the top level;
+// authorize.js and quota.js read them from config.threads
 export const accounts = [
   main,
   ...Object.entries(root.accounts || {}).map(([key, cfg]) => createAccount(key, cfg)),

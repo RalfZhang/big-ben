@@ -1,5 +1,5 @@
 /**
- * 大笨钟 —— 整点报时，同时发豆瓣 / Threads / 长毛象
+ * Big Ben: posts the time every hour to Douban, Threads and Mastodon.
  * @authors RalfZ (ralfz.zhang@gmail.com)
  */
 import ns from 'node-schedule';
@@ -12,13 +12,13 @@ import douban from './platforms/douban.js';
 import { accounts as threadsAccounts } from './platforms/threads/index.js';
 import { accounts as mastodonAccounts } from './platforms/mastodon.js';
 
-// Threads / 长毛象每种语言一个账号，各自是一个平台（threads、threads-en、mastodon……）
+// Threads and Mastodon have one account per language; each is its own platform (threads, threads-en, mastodon…)
 const platforms = [douban, ...threadsAccounts, ...mastodonAccounts].filter((p) => p.enabled);
 
 const once = process.argv.includes('--once');
 
-// POST_ON_STARTUP：逗号分隔的平台名或 all，空 / 0 / false 则不发。
-// 用途是修完某个平台重启后只让它发一条，确认发布链路真的通了
+// POST_ON_STARTUP: comma-separated platform names, or all. Empty / 0 / false = none.
+// Use it after fixing a platform to check that posting works
 function startupTargets() {
   const raw = (process.env.POST_ON_STARTUP || '').trim().toLowerCase();
   if (!raw || raw === '0' || raw === 'false') return [];
@@ -27,16 +27,16 @@ function startupTargets() {
   const want = raw.split(',').map((n) => n.trim()).filter(Boolean);
   const unknown = want.filter((n) => !platforms.some((p) => p.name === n));
   if (unknown.length) {
-    log.warn(`POST_ON_STARTUP 里的 ${unknown.join(', ')} 不是已启用的平台，忽略`
-      + `（可选：${platforms.map((p) => p.name).join(' / ')} / all）`);
+    log.warn(`POST_ON_STARTUP: ${unknown.join(', ')} is not an enabled platform, ignored`
+      + ` (options: ${platforms.map((p) => p.name).join(' / ')} / all)`);
   }
   return platforms.filter((p) => want.includes(p.name));
 }
 
 const MAX_ATTEMPTS = 3;
 
-// 单个平台的一次投递，失败只影响自己。5xx / 限流 / 网络抖动一次就放弃等于白丢一个整点，
-// 所以重试统一在这里做，adapter 只管把错误如实抛出来
+// One delivery to one platform; a failure affects only that platform.
+// All retries happen here, so a short outage doesn't lose the hour. Adapters just throw
 async function deliver(p, text, ctx) {
   const started = Date.now();
   let lastErr;
@@ -53,21 +53,22 @@ async function deliver(p, text, ctx) {
       return;
     } catch (err) {
       lastErr = err;
-      // 不动 p.ready：能进重试的都是 5xx / 限流 / 网络抖动，重登没意义；
-      // 真要重登的（token 失效）是 4xx，会直接落到下面
+      // Keep p.ready: retryable errors are 5xx / rate limits / network, where a new login won't help.
+      // An invalid token is a 4xx and goes straight to the code below
       if (attempt >= MAX_ATTEMPTS || !isRetryable(err)) break;
       log.warn(`${p.name} attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying: ${describeError(err)}`);
       await sleep(2000 * attempt);
     }
   }
 
-  // 标记下轮重新 init —— token 失效这类问题靠重登自愈
+  // Log in again next round; that fixes problems like an invalid token
   p.ready = false;
   log.error(`${p.name} FAILED (${Date.now() - started}ms): ${describeError(lastErr)}`);
   throw lastErr;
 }
 
-// 各平台共用同一个 at：同一种语言报的进度百分比逐字一致，长毛象的 idempotencyKey 也只算一次
+// All platforms share one `at`: same-language posts show the same percent,
+// and the Mastodon idempotency key is computed once
 async function postRound(makeText, { at = now(), targets = platforms, kind = 'hourly' } = {}) {
   const ctx = { at, kind, idempotencyKey: idempotencyKey(kind, at) };
   const results = await Promise.allSettled(
@@ -84,7 +85,7 @@ async function postHourly() {
   await postRound((p, t) => p.locale.hourly(p.brand, t), { at });
 }
 
-// 进程级异常也要留下日志，方便容器重启后回溯
+// Log process-level errors too, so they can be traced after a restart
 process.on('unhandledRejection', (reason) => {
   log.error(`unhandledRejection: ${describeError(reason instanceof Error ? reason : { message: String(reason) })}`);
 });
@@ -93,17 +94,17 @@ process.on('uncaughtException', (err) => {
   process.exit(1);
 });
 
-log.info(`大笨钟 starting (node ${process.version}, log level ${process.env.LOG_LEVEL || 'info'})`);
+log.info(`Big Ben starting (node ${process.version}, log level ${process.env.LOG_LEVEL || 'info'})`);
 
 if (!platforms.length) {
-  log.error('没有启用任何平台，检查 config.js 里各平台的 enabled');
+  log.error('No platform is enabled. Check `enabled` for each platform in config.js');
   process.exit(1);
 }
 log.info(`platforms: ${platforms.map((p) => p.name).join(', ')}`);
 beat();
 
-// 启动时先登一遍让问题当场暴露，但登不上不能退出 ——
-// 配合 restart: unless-stopped 就是无限重启，下个整点自会重试
+// Log in at startup so problems show up early. Don't exit on failure: with
+// restart: unless-stopped that would be a restart loop. The next hour retries anyway
 await Promise.allSettled(platforms.map(async (p) => {
   try {
     await p.init();
@@ -124,19 +125,20 @@ if (startup.length) {
   log.info(`startup notice -> ${startup.map((p) => p.name).join(', ')}`);
   await postRound((p) => p.locale.booting, { targets: startup, kind: 'boot' });
 } else {
-  log.info('startup notice skipped (POST_ON_STARTUP=douban 可让指定平台发一条确认发布链路)');
+  log.info('startup notice skipped (POST_ON_STARTUP=douban posts one to check that posting works)');
 }
 
 ns.scheduleJob('0 * * * *', postHourly);
 
-// screen detach 无任务 1 小时后不执行 schedule，每十分钟唤醒一次；顺便刷新心跳
+// In a detached screen, schedules stop after 1 idle hour, so wake up every 10 minutes.
+// Also refresh the heartbeat
 ns.scheduleJob('30 */10 * * * *', () => {
   log.debug('wakeup tick');
   beat();
 });
 
-// 带 maybeRefresh 的平台（Threads 各账号）长效 token 每天续一次（内部有「满 24 小时才续」的判断），
-// 各账号互不连累
+// Refresh long-lived tokens daily on platforms with maybeRefresh (each Threads account).
+// It skips tokens under 24 hours old. One account failing doesn't affect the others
 const refreshable = platforms.filter((p) => p.maybeRefresh);
 if (refreshable.length) {
   ns.scheduleJob('0 4 * * *', async () => {
@@ -147,9 +149,9 @@ if (refreshable.length) {
   });
 }
 
-// 两个可选功能：被 at 自动回复、评论区自动回复。不要了就把对应的两行删掉，
-// 别处不用动（quota.js / replied.js 两者共用，别跟着删）。
-// import 放这儿是为了删的时候不用翻两个地方 —— ESM 的 import 会提升，跟放开头等价。
+// Two optional features: reply to mentions, reply to comments. To remove one, delete its two lines.
+// Nothing else needs to change (quota.js / replied.js are shared; keep them).
+// The imports are here so removal touches one place. ESM hoists imports, so this works the same.
 import { startMentionWatcher } from './platforms/threads/mentions.js';
 startMentionWatcher();
 

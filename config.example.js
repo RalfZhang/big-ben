@@ -1,95 +1,96 @@
-// 复制为 config.js 后填入真实值（config.js 已在 .gitignore）。
-// 每个平台可以单独 enabled: false 关掉。各项怎么拿见 deploy.md。
+// Copy to config.js and fill in real values (config.js is in .gitignore).
+// Turn off any platform with enabled: false. See doc/deploy.md for how to get each value.
 export default {
   douban: {
     enabled: true,
     api: {
-      key: '',        // 豆瓣 frodo apikey
-      secret: '',     // 对应 secret，用于请求签名
-      device: {       // 伪装成 Android 客户端的设备信息，抓真机包来对
+      key: '',        // Frodo apikey
+      secret: '',     // Frodo secret, used to sign requests
+      device: {       // The Android device we pretend to be. Copy from a real phone's traffic
         sdkInt: 29,
         product: '',
         manufacturer: '',
         model: '',
-        id: '',       // udid，任意稳定的十六进制串即可
-        doubanId: ''  // douban_udid，新版必带
+        id: '',       // udid: any stable hex string
+        doubanId: ''  // douban_udid: required by newer app versions
       }
     },
-    username: '',     // 豆瓣账号（邮箱/手机号）
-    password: ''      // 豆瓣密码
+    username: '',     // Douban login (email or phone)
+    password: ''
   },
 
-  // 顶层是中文主账号（脆脆大笨钟）。其他语言的账号写在最下面的 accounts 里，共用同一个 Meta app
+  // The top level is the main Chinese account (脆脆大笨钟). Other languages go in `accounts`
+  // at the bottom and share the same Meta app
   threads: {
     enabled: true,
-    appId: '',        // Meta 后台 Use cases → Customize → Settings 里的 Threads app ID
-    appSecret: '',    // 同一页的 Threads app secret（续期要用）
-    accessToken: '',  // 同一页最下方 User Token Generator → Generate Access Token
-    userId: '',       // 可留空，留空就用 /me
-    username: '',     // 可留空。填了就在启动时核对 token 是不是这个号的，不是就不发（防授权时登错号）
-    // 只有跑 npm run threads:auth 才需要，值和后台 Redirect Callback URLs 里填的要逐字一致
+    appId: '',        // Meta dashboard: Use cases → Customize → Settings → Threads app ID
+    appSecret: '',    // Same page: Threads app secret (needed to refresh tokens)
+    accessToken: '',  // Same page, bottom: User Token Generator → Generate Access Token
+    userId: '',       // Optional. Empty = /me
+    username: '',     // Optional. If set, startup checks that the token belongs to this account (posts nothing if not)
+    // Only for npm run threads:auth. Must exactly match the Redirect Callback URL in the dashboard
     redirectUri: '',
 
-    // 可选：别人 at 你时自动回一条当前时间。要 threads_manage_mentions，
-    // 没拿到它的 Advanced Access 之前只查得到 Threads tester 发的 at（日志一直 0 条属于正常）
+    // Optional: reply with the current time when someone @mentions you. Needs threads_manage_mentions.
+    // Without Advanced Access you only see mentions from Threads testers (0 in the log is normal)
     mentions: {
       enabled: false,
-      pollSeconds: 60,          // 轮询间隔，也就是被 at 后最坏等这么久（下限 15）
-      maxAgeMinutes: 30,        // 超过这个岁数的 at 不回：停机一天回来别把积压的全刷一遍
-      userCooldownSeconds: 120, // 同一个人的冷却
-      dailyCap: 200             // 本功能每天回复上限（硬闸门见 replyQuotaHeadroom）
+      pollSeconds: 60,          // Poll interval = worst-case reply delay (min 15)
+      maxAgeMinutes: 30,        // Skip older mentions, so a day offline doesn't flood replies
+      userCooldownSeconds: 120, // Per-user cooldown
+      dailyCap: 200             // Daily limit for this feature (hard limit: see replyQuotaHeadroom)
     },
 
-    // 可选：别人在你帖子底下回复时自动回一句 —— 问时间的回报时，其余交给下面的 ai 现编。
-    // 要 threads_read_replies，但不受 mentions 那个 Advanced Access 限制，陌生人的回复也拉得到
+    // Optional: reply to comments under your posts. Time questions get the time; the rest goes to `ai`.
+    // Needs threads_read_replies. No Advanced Access limit: replies from strangers work too
     reply: {
-      enabled: false,           // 开之前先照 deploy.md 跑一遍 REPLY_DRY_RUN=1
-      pollSeconds: 60,          // 轮询间隔（下限 15）
-      lookbackHours: 3,         // 只翻最近这么久自己发的帖子（1~48）
-      maxAgeMinutes: 30,        // 超过这个岁数的回复不回
-      userCooldownSeconds: 60,  // 同一个人的冷却
-      dailyCap: 300,            // 本功能每天回复上限
-      maxTextLength: 480,       // 回复截断长度（Threads 单条上限 500 字符）
-      // 判断和编回复之前，把同一评论串里往前数的几条消息一起喂给 AI，它才看得懂
-      // 「好吧」是聊完了还是刚搭上话。免费档模型别给太多，0~8，0 = 关掉
+      enabled: false,           // Try REPLY_DRY_RUN=1 first (doc/deploy.md)
+      pollSeconds: 60,          // Poll interval (min 15)
+      lookbackHours: 3,         // Only check your posts from the last N hours (1–48)
+      maxAgeMinutes: 30,        // Skip older comments
+      userCooldownSeconds: 60,  // Per-user cooldown
+      dailyCap: 300,            // Daily limit for this feature
+      maxTextLength: 480,       // Cut replies to this length (Threads max is 500)
+      // Earlier messages in the thread to give the AI, so it can tell whether "ok" ends
+      // a chat or starts one. 0–8, 0 = off. Free-tier models do worse with more
       contextMessages: 4
     },
 
-    // 两个自动回复功能共用 Threads 的「1000 条回复/24h」池子，这里预扣掉留给手动操作。
-    // 实际闸门是「服务端真实用量 vs 1000 - 这个数」（platforms/threads/quota.js）。
-    // 整点敲钟不花这个池子 —— 发帖是另一档 250 条/24h
+    // Both reply features share Threads' pool of 1000 replies / 24h. Keep this many free for manual use.
+    // The real limit is "server-side usage vs 1000 - this" (platforms/threads/quota.js).
+    // Hourly posts don't use this pool: posts have their own 250 / 24h
     replyQuotaHeadroom: 100,
 
-    // 其他语言的账号。key 就是语言（en / es / fr，文案见 lib/locales/），也是平台名后缀：
-    // en → threads-en，token 存在 data/threads-en-token.json，POST_ON_STARTUP=threads-en 只让它发。
-    // appId / appSecret / redirectUri 只在上面填一份，各账号共用；mentions / reply 只有主账号有。
-    // 每个号都要先在 Meta 后台加成 Threads Tester，再拿自己的 token，见 deploy.md「多语言账号」
+    // Accounts for other languages. The key is the language (en / es / fr, text in lib/locales/)
+    // and the platform name suffix: en → threads-en, token in data/threads-en-token.json.
+    // appId / appSecret / redirectUri come from above. mentions / reply are main account only.
+    // Add each account as a Threads Tester, then get its own token (doc/deploy.md)
     accounts: {
-      en: { enabled: false, accessToken: '', username: '' },   // 伦敦时间，BONG
-      es: { enabled: false, accessToken: '', username: '' },   // 墨西哥城时间，¡Dong!
-      fr: { enabled: false, accessToken: '', username: '' }    // 巴黎时间，Dong !
+      en: { enabled: false, accessToken: '', username: '' },   // London time, BONG
+      es: { enabled: false, accessToken: '', username: '' },   // Mexico City time, ¡Dong!
+      fr: { enabled: false, accessToken: '', username: '' }    // Paris time, Dong !
     }
   },
 
   mastodon: {
     enabled: true,
     instance: 'https://m.cmx.im',
-    accessToken: '',  // 偏好设置 → 开发 → 新建应用，scope 勾 write:statuses
-    // 其他语言的账号，规则同 threads.accounts（mastodon-en 之类），实例各填各的：
+    accessToken: '',  // Preferences → Development → New application, scope write:statuses
+    // Other languages, same rules as threads.accounts (mastodon-en etc.). Each can use its own instance:
     //   en: { enabled: true, instance: 'https://...', accessToken: '' }
     accounts: {}
   },
 
-  // 给「评论区自动回复」现编回复用的模型，只有 threads.reply.enabled 时才会被调用。
-  // 加第二家兜底：照 services/gemini.js 的形状写个模块塞进 services/ai.js 的 PROVIDERS
+  // Model for comment replies. Only used when threads.reply.enabled is true.
+  // To add a fallback, write a module like services/gemini.js and add it to PROVIDERS in services/ai.js
   ai: {
     gemini: {
       enabled: true,
-      apiKey: '',                       // https://aistudio.google.com/apikey，免费档够用
-      model: 'gemini-3.5-flash-lite',   // 留空用默认。名字写错 Google 回 404
+      apiKey: '',                       // https://aistudio.google.com/apikey (free tier is enough)
+      model: 'gemini-3.5-flash-lite',   // Empty = default. A wrong name returns 404
       timeoutMs: 20000,
-      // 原样透传给 Gemini。想关掉「思考」省额度才需要动 ——
-      // 2.5 系 { thinkingConfig: { thinkingBudget: 0 } }，3.x 系 { thinkingConfig: { thinkingLevel: 'low' } }
+      // Passed to Gemini as is. Change it only to turn off "thinking" and save quota:
+      // 2.5 models { thinkingConfig: { thinkingBudget: 0 } }, 3.x models { thinkingConfig: { thinkingLevel: 'low' } }
       generationConfig: {}
     }
   }

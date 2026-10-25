@@ -1,6 +1,6 @@
-# push 到 master 自动部署。VPS 那边 authorized_keys 用 command= 把这把 key 锁死成
-# 「git pull + ./deploy.sh」，所以这里 ssh 上去不带命令，key 漏了也干不了别的。
-# 首次配置见 deploy.md「更新」
+# Deploy on push to master. On the VPS, authorized_keys locks this key to
+# `git pull && ./deploy.sh` with command=, so we ssh in without a command,
+# and a leaked key can do nothing else. Setup: doc/deploy.md
 name: deploy
 
 on:
@@ -9,7 +9,7 @@ on:
     paths-ignore: ['**.md']
   workflow_dispatch:
 
-# 连推几次就排队挨个来。不取消正在跑的 —— 半路掐断可能把容器撂在停了一半的状态
+# Queue pushes. Don't cancel a running deploy: it could leave the container half-stopped
 concurrency:
   group: deploy
   cancel-in-progress: false
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: ssh 到 VPS 部署
+      - name: Deploy to VPS over ssh
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
@@ -33,7 +33,7 @@ jobs:
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
-          # 整点附近 deploy.sh 会干等几分钟不出声，靠心跳撑住连接
+          # Near the hour deploy.sh waits silently for minutes; keepalives hold the connection
           ssh -T -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
             -o BatchMode=yes -o ServerAliveInterval=30 \
             "$DEPLOY_USER@$DEPLOY_HOST"

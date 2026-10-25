@@ -1,7 +1,7 @@
 {
   "name": "big-ben",
   "version": "3.0.0",
-  "description": "大笨钟 —— 整点报时，同时发豆瓣 / Threads / 长毛象",
+  "description": "Big Ben: hourly chimes on Douban, Threads and Mastodon",
   "main": "index.js",
   "type": "module",
   "author": "RalfZ",

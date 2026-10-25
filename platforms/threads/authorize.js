@@ -1,17 +1,18 @@
 /**
- * 一次性的 Threads OAuth 授权，拿 User Token Generator 给不了的权限 ——
- * 那个按钮发的 scope 是写死的首发五件套，跟 use case 里加了什么无关，
- * threads_manage_mentions 这类只能走正式 OAuth 显式要。
+ * One-time Threads OAuth, for scopes the User Token Generator can't give: that button always
+ * grants the same five launch scopes, whatever the use case has. Newer scopes such as
+ * threads_manage_mentions must be requested through OAuth.
  *
- * 前置：Meta 后台把 DEFAULT_SCOPES 逐个 Add，Redirect Callback URLs 填的
- * 那个 URL 原样抄进 config.threads.redirectUri（逐字一致）。详见 deploy.md。
- * 跑完直接写好该账号的 token 文件，之后进程每天 04:00 自己续期。
+ * Before: Add each of DEFAULT_SCOPES in the Meta dashboard, and copy the Redirect Callback URL
+ * exactly into config.threads.redirectUri. See doc/deploy.md.
+ * This writes the account's token file; the process then refreshes it daily at 04:00.
  *
- *   npm run threads:auth                  中文主账号 → data/threads-token.json
+ *   npm run threads:auth                  main Chinese account → data/threads-token.json
  *   npm run threads:auth -- en            config.threads.accounts.en → data/threads-en-token.json
  *   npm run threads:auth -- en --scopes=threads_basic,threads_content_publish
  *
- * 授权给的是浏览器里当前登着的那个 Threads 账号，所以多账号时用无痕窗口登对应的号。
+ * The token is for whichever Threads account is logged in to the browser.
+ * For other accounts, use a private window and log in to that account.
  */
 import readline from 'node:readline/promises';
 
@@ -20,7 +21,7 @@ import { accounts, handle } from './index.js';
 
 const cfg = config.threads || {};
 
-// 前两个发帖必需，后两个分别给「被 at 自动回复」和「评论区自动回复」
+// The first two are needed to post; the last two are for mention replies and comment replies
 const DEFAULT_SCOPES = [
   'threads_basic',
   'threads_content_publish',
@@ -35,27 +36,27 @@ function die(msg) {
   process.exit(1);
 }
 
-// 授权码流程里每一步的报错都埋在 body 里，状态码本身说明不了什么
+// Each step puts its error in the body; the status code alone says little
 async function call(label, url, init) {
   const res = await fetch(url, { ...init, signal: AbortSignal.timeout(20000) });
   const text = await res.text();
   let body = text;
-  try { body = JSON.parse(text); } catch { /* 不是 JSON 就原样报出来 */ }
+  try { body = JSON.parse(text); } catch { /* not JSON: report as is */ }
   if (!res.ok) {
-    die(`${label} 失败（HTTP ${res.status}）：\n  ${JSON.stringify(body)}`);
+    die(`${label} failed (HTTP ${res.status}):\n  ${JSON.stringify(body)}`);
   }
   return body;
 }
 
-// 粘回来的可能是整条 redirect URL，也可能只是 code。
-// Threads 会在 URL 末尾加个 "#_"，不剥掉会带进 code 里导致兑换失败
+// The input may be the full redirect URL or just the code.
+// Threads adds "#_" to the URL; left in the code, it breaks the exchange
 function extractCode(input) {
   const raw = input.trim().replace(/#_$/, '');
   if (!raw) return null;
   try {
     return new URL(raw).searchParams.get('code');
   } catch {
-    return raw.includes('=') ? null : raw;   // 不是 URL 就当成裸 code
+    return raw.includes('=') ? null : raw;   // not a URL: treat it as a bare code
   }
 }
 
@@ -64,23 +65,23 @@ const scopeArg = args.find((a) => a.startsWith('--scopes='));
 const scopes = (scopeArg ? scopeArg.slice('--scopes='.length) : DEFAULT_SCOPES.join(','))
   .split(',').map((s) => s.trim()).filter(Boolean);
 
-// 认 en 也认 threads-en；不给就是中文主账号（它的 key 是空串）
+// Accepts en or threads-en. Empty means the main Chinese account (key '')
 const arg = args.find((a) => !a.startsWith('--')) || '';
 const account = accounts.find((a) => a.key === arg.replace(/^threads-?/, ''));
 if (!account) {
-  die(`config 里没有「${arg}」这个 Threads 账号。可选：`
-    + `${accounts.map((a) => a.key || '（不填）').join(' / ')}\n`
-    + '  新账号先在 config.threads.accounts 里加上，比如 accounts: { en: { enabled: true } }');
+  die(`No Threads account "${arg}" in config. Options: `
+    + `${accounts.map((a) => a.key || '(empty)').join(' / ')}\n`
+    + '  Add new accounts to config.threads.accounts first, e.g. accounts: { en: { enabled: true } }');
 }
 const TOKEN_FILE = account.tokenFile;
 const expected = account.username;
 
-if (!cfg.appId) die('config.threads.appId 是空的');
-if (!cfg.appSecret) die('config.threads.appSecret 是空的（兑换长效 token 要用）');
+if (!cfg.appId) die('config.threads.appId is empty');
+if (!cfg.appSecret) die('config.threads.appSecret is empty (needed for the long-lived token)');
 if (!cfg.redirectUri) {
-  die('config.threads.redirectUri 是空的。\n'
-    + '  去 Meta 后台 Use cases → Customize → Settings → Redirect Callback URLs 填一个，\n'
-    + '  再原样抄进 config.js —— 两边差一个斜杠都会被拒。');
+  die('config.threads.redirectUri is empty.\n'
+    + '  Add one in the Meta dashboard under Use cases → Customize → Settings → Redirect Callback URLs,\n'
+    + '  then copy it exactly into config.js. Even one extra slash makes it fail.');
 }
 
 const authUrl = new URL('https://threads.net/oauth/authorize');
@@ -89,24 +90,24 @@ authUrl.searchParams.set('redirect_uri', cfg.redirectUri);
 authUrl.searchParams.set('response_type', 'code');
 authUrl.searchParams.set('scope', scopes.join(','));
 
-console.log(`\n要授权的账号：${account.name}${expected ? `（@${expected}）` : ''}`);
-console.log('\n要申请的权限：');
+console.log(`\nAccount: ${account.name}${expected ? ` (@${expected})` : ''}`);
+console.log('\nScopes to request:');
 for (const s of scopes) console.log(`  - ${s}`);
-console.log(`\n用 ${expected ? `@${expected}` : `${account.name} 对应的`} 这个 Threads 账号登录（浏览器里登着别的号就开无痕窗口），`
-  + '然后打开这个链接授权：\n');
+console.log(`\nLog in to Threads as ${expected ? `@${expected}` : `the ${account.name} account`} `
+  + '(use a private window if another account is logged in), then open this link:\n');
 console.log(authUrl.toString());
-console.log('\n授权后浏览器会跳到 %s（打不开是正常的），', cfg.redirectUri);
-console.log('把地址栏里那条完整 URL 复制粘贴到这里：\n');
+console.log('\nAfter you authorize, the browser goes to %s (it is fine if the page does not load).', cfg.redirectUri);
+console.log('Copy the full URL from the address bar and paste it here:\n');
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const answer = await rl.question('> ');
 rl.close();
 
 const code = extractCode(answer);
-if (!code) die('没从里面解析出 code。粘贴整条 redirect URL，或者只粘 code= 后面那一段。');
+if (!code) die('No code found. Paste the full redirect URL, or just the part after code=.');
 
-// 授权码 → 短效 token（1 小时）
-const short = await call('授权码兑换', `${GRAPH}/oauth/access_token`, {
+// Authorization code → short-lived token (1 hour)
+const short = await call('code exchange', `${GRAPH}/oauth/access_token`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
   body: new URLSearchParams({
@@ -117,53 +118,54 @@ const short = await call('授权码兑换', `${GRAPH}/oauth/access_token`, {
     code,
   }).toString(),
 });
-if (!short.access_token) die(`没拿到短效 token：${JSON.stringify(short)}`);
-console.log('\n✓ 短效 token 到手');
+if (!short.access_token) die(`No short-lived token: ${JSON.stringify(short)}`);
+console.log('\n✓ Got short-lived token');
 
-// 短效 → 长效（60 天）
+// Short-lived → long-lived (60 days)
 const longUrl = new URL(`${GRAPH}/access_token`);
 longUrl.searchParams.set('grant_type', 'th_exchange_token');
 longUrl.searchParams.set('client_secret', cfg.appSecret);
 longUrl.searchParams.set('access_token', short.access_token);
-const long = await call('长效 token 兑换', longUrl.toString());
-if (!long.access_token) die(`没拿到长效 token：${JSON.stringify(long)}`);
+const long = await call('long-lived token exchange', longUrl.toString());
+if (!long.access_token) die(`No long-lived token: ${JSON.stringify(long)}`);
 
 const expiresIn = Number(long.expires_in) || 60 * 24 * 3600;
-console.log(`✓ 长效 token 到手，${Math.round(expiresIn / 86400)} 天后过期`);
+console.log(`✓ Got long-lived token, expires in ${Math.round(expiresIn / 86400)} days`);
 
-// 当场验一下实际拿到的 scope，不然等进程跑起来又是那个毫无信息量的 500
+// Check the granted scopes now; otherwise the process later gets that useless 500
 const dbg = await call('debug_token', `${GRAPH}/debug_token`
   + `?input_token=${encodeURIComponent(long.access_token)}`
   + `&access_token=${encodeURIComponent(long.access_token)}`);
 const granted = dbg?.data?.scopes || [];
-console.log('\n实际拿到的权限：');
+console.log('\nGranted scopes:');
 for (const s of granted) console.log(`  ✓ ${s}`);
 const missing = scopes.filter((s) => !granted.includes(s));
 if (missing.length) {
-  console.log('\n没拿到的：');
+  console.log('\nNot granted:');
   for (const s of missing) console.log(`  ✗ ${s}`);
-  console.log('\n这些多半是没在 Use cases → Customize → Permissions and features 里 Add。');
+  console.log('\nThese were probably not added under Use cases → Customize → Permissions and features.');
 }
 
-// 写文件之前先看看 token 到底是谁的：浏览器里登错了号，英文报时就会发到中文账号上
+// Check whose token this is before writing it: with the wrong browser login,
+// English posts would go to the Chinese account
 const me = await call('/me', `${GRAPH}/v1.0/me?fields=id,username`
   + `&access_token=${encodeURIComponent(long.access_token)}`);
 if (expected && handle(me.username) !== expected) {
-  die(`这个 token 属于 @${me.username}，不是 config 里给 ${account.name} 写的 @${expected}。没有写入。\n`
-    + '  浏览器里登对账号（或开无痕窗口）再跑一次。');
+  die(`This token belongs to @${me.username}, not @${expected} from config for ${account.name}. Nothing written.\n`
+    + '  Log in to the right account in the browser (or use a private window) and run again.');
 }
-console.log(`\n✓ 这个 token 属于 @${me.username}`);
+console.log(`\n✓ This token belongs to @${me.username}`);
 if (!expected) {
-  console.log(`  确认这就是 ${account.name} 该用的号。`
-    + `建议把 username: '${me.username}' 填进 config 里这个账号，以后登错号进程会直接拒绝启动。`);
+  console.log(`  Make sure this is the right account for ${account.name}. `
+    + `Tip: add username: '${me.username}' to this account in config, so a wrong account is refused at startup.`);
   const confirm = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ok = (await confirm.question(`写入 ${TOKEN_FILE}？(y/N) `)).trim().toLowerCase();
+  const ok = (await confirm.question(`Write ${TOKEN_FILE}? (y/N) `)).trim().toLowerCase();
   confirm.close();
-  if (ok !== 'y' && ok !== 'yes') die('没有写入。');
+  if (ok !== 'y' && ok !== 'yes') die('Nothing written.');
 }
 
 account.saveToken(long.access_token, expiresIn);
 
-console.log(`\n✓ 已写入 ${TOKEN_FILE}`);
-console.log('\n注意：config 里这个账号的 accessToken 那份是旧的，但以 data/ 里这份为准，不用改。');
-console.log('接下来：docker compose up -d\n');
+console.log(`\n✓ Wrote ${TOKEN_FILE}`);
+console.log('\nThe accessToken in config is now old, but the file in data/ wins. No need to change it.');
+console.log('Next: docker compose up -d\n');

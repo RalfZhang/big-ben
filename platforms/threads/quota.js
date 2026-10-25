@@ -1,9 +1,9 @@
 /**
- * 共享的回复配额闸门 —— 两个 watcher 花的是同一个池子（API 回复 1000 条/24h 滑动窗口），
- * 各记各的日计数就会算出 200 + 900 这种超额，所以直接问服务端的真实用量。
- * 顺带解决三件事：重启后计数不清零、滑动窗口跟自然日对不上、手动在 App 里回的也算进去。
+ * Shared reply quota gate. Both watchers use one pool (1000 API replies per rolling 24h);
+ * separate counts could add up to more, so ask the server for real usage. This also survives
+ * restarts, matches the rolling window, and counts manual replies from the app.
  *
- * 整点敲钟不花这个池子 —— 发帖是另一档 250 条/24h。
+ * Hourly posts don't use this pool: posts have their own 250 / 24h.
  */
 import config from '../../config.js';
 import { log, describeError } from '../../lib/log.js';
@@ -11,20 +11,20 @@ import { main as threads } from './index.js';
 
 const cfg = config.threads || {};
 
-// 查不到 reply_config 时的兜底值，也就是文档写的那个数
+// Used when reply_config is missing; the number from Meta's docs
 const FALLBACK_TOTAL = 1000;
 
 const headroom = Math.max(0, Number(cfg.replyQuotaHeadroom ?? 100));
 
-// 每条回复前都问一次太浪费，缓存一分钟；缓存期内发出去的用 spent 自己扣，不会超发
+// Cache for a minute instead of asking before every reply; replies sent meanwhile are counted in `spent`
 const CACHE_MS = 60 * 1000;
 
 let cache = { at: 0, left: null };
 let spent = 0;
 let warned = false;
 
-// 还能再回几条。null = 问不出来，调用方退回自己的 dailyCap ——
-// 宁可 null 也不返回 0，这个 edge 抽风不该让整个功能停摆
+// Replies left. null = unknown, and callers fall back to their dailyCap.
+// null rather than 0: a flaky endpoint shouldn't stop the whole feature
 export async function replyBudgetLeft() {
   if (cache.left !== null && Date.now() - cache.at < CACHE_MS) {
     return Math.max(0, cache.left - spent);
@@ -34,7 +34,7 @@ export async function replyBudgetLeft() {
     const body = await threads.graph(`/${threads.owner}/threads_publishing_limit`, {
       form: { fields: 'reply_quota_usage,reply_config' },
     });
-    // 这个 edge 返回 { data: [ {...} ] }，但真给成裸对象也接着
+    // The edge returns { data: [ {...} ] }, but accept a bare object too
     const row = (Array.isArray(body?.data) ? body.data[0] : body) || {};
     const total = Number(row.reply_config?.quota_total) || FALLBACK_TOTAL;
     const used = Number(row.reply_quota_usage) || 0;
@@ -42,12 +42,12 @@ export async function replyBudgetLeft() {
     cache = { at: Date.now(), left: Math.max(0, total - headroom - used) };
     spent = 0;
     warned = false;
-    log.debug(`threads reply quota: 已用 ${used}/${total}，预留 ${headroom}，还能回 ${cache.left} 条`);
+    log.debug(`threads reply quota: used ${used}/${total}, reserved ${headroom}, ${cache.left} left`);
     return cache.left;
   } catch (err) {
-    // 每分钟一条 WARN 也是刷屏，只在状态变化时说一次
+    // Warn once per state change, not every minute
     if (!warned) {
-      log.warn(`threads_publishing_limit 查不到，回复配额改由各自的 dailyCap 兜着：${describeError(err)}`);
+      log.warn(`threads_publishing_limit unavailable, falling back to each dailyCap: ${describeError(err)}`);
       warned = true;
     }
     cache = { at: Date.now(), left: null };
@@ -55,7 +55,7 @@ export async function replyBudgetLeft() {
   }
 }
 
-// 发出去一条就喊一声，让缓存期内的判断跟着往下走
+// Call after each reply, so checks during the cache period stay correct
 export function spendReplyBudget(n = 1) {
   spent += n;
 }

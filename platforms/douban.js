@@ -1,5 +1,6 @@
-// 豆瓣：伪装 Android 客户端（Frodo）打 frodo.douban.com。
-// 签名算法、UA 字段顺序、参数放 body 还是 query 都是对着真机抓包调出来的，改动前先抓包确认。
+// Douban: act as the Android app (Frodo) and call frodo.douban.com.
+// The signature, User-Agent field order and body-vs-query params all match real app traffic.
+// Capture the traffic again before changing them.
 import crypto from 'node:crypto';
 
 import config from '../config.js';
@@ -16,7 +17,7 @@ async function frodoRequest({ url, method = 'GET', form }) {
   const device = cfg.api.device;
 
   const headers = {
-    // 对齐真机抓包，字段顺序也一致
+    // Same as the real app, including field order
     'User-Agent':
       `api-client/1 com.douban.frodo/7.130.0.beta2(357) Android/${device.sdkInt}` +
       `  udid/${device.id}  douban_udid/${device.doubanId}` +
@@ -32,17 +33,17 @@ async function frodoRequest({ url, method = 'GET', form }) {
   const isWrite = ['PATCH', 'POST', 'PUT'].includes(method);
   const body = isWrite ? new URLSearchParams(form || {}) : null;
 
-  // 对齐真机：写请求的公共参数放 body，读请求放 query
+  // Like the real app: common params go in the body for writes, in the query for reads
   const addParam = (name, value) => {
     if (isWrite) body.set(name, value);
     else u.searchParams.set(name, value);
   };
 
   addParam('udid', device.id);
-  addParam('douban_udid', device.doubanId);   // 新版必带（抓包发现）
+  addParam('douban_udid', device.doubanId);   // required by newer app versions
   addParam('apikey', cfg.api.key);
   addParam('os_rom', 'android');
-  addParam('channel', 'douban');   // 真机是小写 douban，不是 Douban
+  addParam('channel', 'douban');   // lowercase, like the real app
 
   let signature = method;
   signature += `&${encodeURIComponent(decodeURIComponent(path).replace(/\/$/, ''))}`;
@@ -79,7 +80,7 @@ async function frodoRequest({ url, method = 'GET', form }) {
   return parsed;
 }
 
-// 真机启动时会先注册设备再登录
+// The real app registers the device before logging in
 async function registerDevice() {
   try {
     await frodoRequest({
@@ -112,8 +113,8 @@ async function authenticate() {
   log.info(`douban authenticated as ${body.douban_user_name || body.douban_user_id}`);
 }
 
-// 新版发广播用 /api/v2/topic/post（旧的 status/create_status 已废弃，返回 999），
-// 正文是 Draft.js 结构的 JSON
+// Newer app versions post via /api/v2/topic/post (the old status/create_status returns 999).
+// content is Draft.js JSON
 function buildContent(text) {
   return JSON.stringify({
     blocks: [{
